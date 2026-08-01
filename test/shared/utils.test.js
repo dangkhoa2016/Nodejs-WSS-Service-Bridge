@@ -81,7 +81,7 @@ describe('validateHmacSignature', () => {
 
   it('returns false for tampered sig', () => {
     const { expires, sig } = generateSignedUrl('/config', 'secret', 3600);
-    const tampered = `${sig.slice(0, -2)}ff`;
+    const tampered = `${sig[0] === 'f' ? 'e' : 'f'}${sig.slice(1)}`;
     assert.equal(validateHmacSignature('/config', 'secret', expires, tampered), false);
   });
 
