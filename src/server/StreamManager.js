@@ -1,5 +1,6 @@
 import WebSocket from 'ws';
 import { MAX_DEST_BUFFER_BYTES, STREAM_IDLE_TIMEOUT_MS } from '../shared/config.js';
+import { resetIdleTimeout } from '../shared/idle-timeout.js';
 import { logVerbose } from '../shared/logger.js';
 import { FrameCodec, PROTO, sendFrame, sendJsonFrame } from '../shared/protocol.js';
 import { sanitizeHeaders } from '../shared/utils.js';
@@ -33,14 +34,10 @@ export class StreamManager {
   }
 
   _resetIdleTimer(state) {
-    if (state.timer) clearTimeout(state.timer);
-
-    state.timer = setTimeout(() => {
+    resetIdleTimeout(state, STREAM_IDLE_TIMEOUT_MS, () => {
       logVerbose('stream', 'idle_timeout', { streamId: state.id });
       this.abortAnyStream(state, 'Stream idle timeout', true);
-    }, STREAM_IDLE_TIMEOUT_MS);
-
-    if (state.timer.unref) state.timer.unref();
+    });
   }
 
   cleanupStream(state) {
@@ -516,6 +513,8 @@ export class StreamManager {
             // way as a connect-level rejection instead of an unknown stream.
             sendJsonFrame(state.agentWs, PROTO.TYPE.TCP_ABORT, 0, {
               port: state.serverPort,
+              ...(state.connectRequestId ? { requestId: state.connectRequestId } : {}),
+              ...(state.targetTunnelId ? { targetTunnelId: state.targetTunnelId } : {}),
               message: info.message || 'Client aborted',
             });
             state.awaitingClientAck = false;

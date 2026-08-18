@@ -195,9 +195,18 @@ export class TcpRouter {
     });
   }
 
-  createAgentStream({ agentWs, port }) {
-    const ws = this.clientManager.getActiveClient();
-    if (!ws) return { error: 'No tunnel client connected' };
+  createAgentStream({ agentWs, port, targetTunnelId = '' }) {
+    const resolved =
+      typeof this.clientManager.resolveTargetClient === 'function'
+        ? this.clientManager.resolveTargetClient(targetTunnelId)
+        : {
+            ws: this.clientManager.getActiveClient(),
+            tunnelId: '',
+            error: 'No tunnel client connected',
+          };
+    if (!resolved.ws) return { error: resolved.error || 'No tunnel client connected' };
+
+    const ws = resolved.ws;
 
     if (this.streamManager.size >= MAX_CONCURRENT_STREAMS) {
       return { error: 'Too many concurrent streams' };
@@ -221,6 +230,7 @@ export class TcpRouter {
     if (!state) return { error: 'Stream init failed' };
     state.agentWs = agentWs;
     state.awaitingClientAck = true;
+    state.targetTunnelId = resolved.tunnelId;
 
     const sent = sendJsonFrame(ws, PROTO.TYPE.TCP_OPEN, streamId, { host: TCP_TUNNEL_HOST, port });
     if (!sent) {
@@ -228,12 +238,21 @@ export class TcpRouter {
       return { error: 'Failed to send TCP_OPEN' };
     }
 
-    logVerbose('tcp', 'tcp_open_sent', { streamId, port, host: TCP_TUNNEL_HOST });
+    logVerbose('tcp', 'tcp_open_sent', {
+      streamId,
+      port,
+      host: TCP_TUNNEL_HOST,
+      ...(resolved.tunnelId ? { targetTunnelId: resolved.tunnelId } : {}),
+    });
 
     this._wireStream(socket, state, port);
 
-    logVerbose('tcp', 'agent_stream', { streamId, port });
-    return { state, streamId };
+    logVerbose('tcp', 'agent_stream', {
+      streamId,
+      port,
+      ...(resolved.tunnelId ? { targetTunnelId: resolved.tunnelId } : {}),
+    });
+    return { state, streamId, targetTunnelId: resolved.tunnelId };
   }
 
   _sendFrame(ws, frame) {
