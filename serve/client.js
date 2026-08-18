@@ -8,9 +8,11 @@ import { URL } from 'node:url';
 import WebSocket from 'ws';
 
 import { WsFrameWriter } from '../src/server/WsFrameWriter.js';
+import { resetIdleTimeout } from '../src/shared/idle-timeout.js';
 import { logStandard, logVerbose } from '../src/shared/logging.js';
 import { FrameCodec, PROTO, sendFrame, sendJsonFrame } from '../src/shared/protocol.js';
 import { readInteger } from '../src/shared/runtime-config.js';
+import { normalizeTunnelId } from '../src/shared/tunnel-id.js';
 import { sanitizeHeaders } from '../src/shared/utils.js';
 import { createTcpClientHandler } from '../src/tcp/TcpClientHandler.js';
 
@@ -49,6 +51,14 @@ if (process.env.NODE_ENV === 'development') {
 const SERVER_URL = process.env.TUNNEL_SERVER_URL || '';
 const USERNAME = process.env.TUNNEL_USERNAME || '';
 const PASSWORD = process.env.TUNNEL_PASSWORD || '';
+
+let TUNNEL_ID = '';
+try {
+  TUNNEL_ID = normalizeTunnelId(process.env.TUNNEL_ID || '', { name: 'TUNNEL_ID' });
+} catch (err) {
+  console.error(`[client] ${err.message}`);
+  process.exit(1);
+}
 
 const TARGET_ORIGIN = (() => {
   const raw = process.env.TARGET_ORIGIN || 'http://127.0.0.1:8000';
@@ -161,13 +171,9 @@ let shuttingDown = false;
 // ---------------------------------------------------------------------------
 
 function resetIdleTimer(state) {
-  if (state.timer) clearTimeout(state.timer);
-
-  state.timer = setTimeout(() => {
+  resetIdleTimeout(state, STREAM_IDLE_TIMEOUT_MS, () => {
     sendResAbort(state, 'Stream idle timeout');
-  }, STREAM_IDLE_TIMEOUT_MS);
-
-  if (state.timer.unref) state.timer.unref();
+  });
 }
 
 function cleanupStream(state) {
@@ -523,6 +529,7 @@ function connect() {
   const wsUrl = new URL(SERVER_URL);
   wsUrl.username = USERNAME;
   wsUrl.password = PASSWORD;
+  if (TUNNEL_ID) wsUrl.searchParams.set('tunnelId', TUNNEL_ID);
 
   ws = new WebSocket(wsUrl.href, {
     headers: {
@@ -643,6 +650,10 @@ process.on('SIGINT', shutdown);
 // Entry point
 // ---------------------------------------------------------------------------
 
-logStandard('client', 'start', { target_origin: TARGET_ORIGIN, server_url: SERVER_URL });
+logStandard('client', 'start', {
+  target_origin: TARGET_ORIGIN,
+  server_url: SERVER_URL,
+  ...(TUNNEL_ID ? { tunnel_id: TUNNEL_ID } : {}),
+});
 
 connect();
