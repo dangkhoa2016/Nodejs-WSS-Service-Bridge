@@ -159,6 +159,31 @@ describe('auditRange integration', () => {
     assert.match(churnViolation, /3000-line threshold/);
   });
 
+  it('accepts a GitHub pull request subject only on a real merge commit', () => {
+    const dir = makeRepo();
+    writeFileSync(join(dir, 'base.txt'), 'x\n');
+    const base = commitAll(dir, 'feat: base setup');
+
+    git(dir, ['checkout', '-b', 'feature']);
+    writeFileSync(join(dir, 'feature.txt'), 'y\n');
+    commitAll(dir, 'feat: feature work');
+
+    git(dir, ['checkout', 'main']);
+    git(dir, [
+      'merge',
+      '--no-ff',
+      'feature',
+      '-m',
+      'Merge pull request #42 from example/feature',
+      '-m',
+      'feat: add feature',
+    ]);
+
+    const head = git(dir, ['rev-parse', 'HEAD']);
+    const result = inRepo(dir, () => auditRange(base, head));
+    assert.deepEqual(result.violations, []);
+  });
+
   it('does not count binary file churn against the numeric threshold', () => {
     const dir = makeRepo();
     writeFileSync(join(dir, 'base.txt'), 'x\n');
