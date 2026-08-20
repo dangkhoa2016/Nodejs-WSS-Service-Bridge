@@ -170,11 +170,19 @@ export class TunnelServer {
     });
 
     this._wss.on('connection', (ws, req) => {
+      let tunnelId = '';
+      try {
+        tunnelId = new URL(req?.url || TUNNEL_PATH, 'http://localhost').searchParams.get('tunnelId') || '';
+      } catch {
+        // ClientManager validates the identifier; malformed URLs simply have no ID.
+      }
+
       logVerbose('ws', 'connect', {
         remoteAddr: req?.socket?.remoteAddress,
         clientCount: this.clientManager.clients.size + 1,
+        ...(tunnelId ? { tunnelId } : {}),
       });
-      this.clientManager.addClient(ws);
+      this.clientManager.addClient(ws, tunnelId);
     });
 
     if (this._agentWss) {

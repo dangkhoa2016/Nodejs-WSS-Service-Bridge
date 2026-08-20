@@ -3,9 +3,10 @@ import net from 'node:net';
 import WebSocket from 'ws';
 
 import { logError, logStandard, logVerbose } from '../src/shared/logging.js';
-import { parseAgentPorts } from '../src/shared/port-parser.js';
+import { parseAgentPorts, parseAgentRoutes } from '../src/shared/port-parser.js';
 import { FrameCodec, PROTO, sendFrame, sendJsonFrame } from '../src/shared/protocol.js';
 import { readInteger } from '../src/shared/runtime-config.js';
+import { normalizeTunnelId } from '../src/shared/tunnel-id.js';
 
 if (process.env.NODE_ENV === 'development') {
   try {
@@ -37,7 +38,7 @@ if (process.env.NODE_ENV === 'development') {
  *   TUNNEL_SERVER_URL
  *   TUNNEL_USERNAME
  *   TUNNEL_PASSWORD
- *   AGENT_PORTS
+ *   AGENT_PORTS or AGENT_ROUTES
  *
  * Credentials: AGENT_USERNAME/AGENT_PASSWORD, falling back to
  * TUNNEL_USERNAME/TUNNEL_PASSWORD.
@@ -68,9 +69,27 @@ if (!SERVER_URL || !USERNAME || !PASSWORD) {
   process.exit(1);
 }
 
-let AGENT_PORTS;
+let ROUTES;
 try {
-  AGENT_PORTS = parseAgentPorts(process.env.AGENT_PORTS || '');
+  const rawPorts = process.env.AGENT_PORTS || '';
+  const rawRoutes = process.env.AGENT_ROUTES || '';
+
+  if (rawPorts.trim() && rawRoutes.trim()) {
+    throw new Error('AGENT_PORTS and AGENT_ROUTES are mutually exclusive');
+  }
+
+  if (rawRoutes.trim()) {
+    ROUTES = parseAgentRoutes(rawRoutes);
+  } else {
+    const targetTunnelId = normalizeTunnelId(process.env.TARGET_TUNNEL_ID || '', {
+      name: 'TARGET_TUNNEL_ID',
+    });
+    ROUTES = parseAgentPorts(rawPorts).map((port) => ({
+      localPort: port,
+      targetTunnelId,
+      targetPort: port,
+    }));
+  }
 } catch (err) {
   console.error(`[tcp-agent] ${err.message}`);
   process.exit(1);
@@ -89,6 +108,7 @@ let reconnectDelay = readInteger('AGENT_RECONNECT_DELAY_MS', 1000, { min: 100 })
 let reconnectAttempt = 0;
 let authFailed = false;
 let shuttingDown = false;
+let nextConnectRequestId = 1;
 
 // streamId -> { socket, streamId, pendingSends, pausedForWs, peerPausedRead, localWriteBackpressured, cleaned }
 const streamedSockets = new Map();
@@ -99,7 +119,7 @@ const listeners = [];
 
 // Ports requested via AGENT_PORTS that must all be listening before the agent
 // may report ready.
-const requestedPorts = new Set(AGENT_PORTS);
+const requestedPorts = new Set(ROUTES.map((route) => route.localPort));
 // Ports whose listener has actually emitted "listening".
 const listeningPorts = new Set();
 // True once every listener is up AND the WebSocket is open.
@@ -161,10 +181,17 @@ function clearReady() {
 // Local listener
 // ---------------------------------------------------------------------------
 
-function createLocalListener(port) {
+function allocateConnectRequestId() {
+  const id = nextConnectRequestId;
+  nextConnectRequestId = nextConnectRequestId >= Number.MAX_SAFE_INTEGER ? 1 : nextConnectRequestId + 1;
+  return id;
+}
+
+function createLocalListener(route) {
+  const { localPort, targetPort, targetTunnelId } = route;
+
   const server = net.createServer((socket) => {
     socket.setNoDelay(true);
-    // Do not emit data until the server acknowledges the stream.
     socket.pause();
 
     const removePending = () => {
@@ -176,9 +203,7 @@ function createLocalListener(port) {
       removePending();
       try {
         socket.destroy();
-      } catch {
-        // ignore
-      }
+      } catch {}
     });
     socket.on('close', removePending);
 
@@ -187,16 +212,31 @@ function createLocalListener(port) {
       return;
     }
 
-    const entry = { localSocket: socket, port };
+    const requestId = allocateConnectRequestId();
+    const entry = { localSocket: socket, localPort, targetPort, targetTunnelId, requestId };
     pendingConnects.push(entry);
 
-    logVerbose('agent', 'local_connect_received', { port, pending: pendingConnects.length });
+    logVerbose('agent', 'local_connect_received', {
+      localPort,
+      targetPort,
+      ...(targetTunnelId ? { targetTunnelId } : {}),
+      requestId,
+      pending: pendingConnects.length,
+    });
+
+    const connectInfo = { port: targetPort, requestId };
+    if (targetTunnelId) connectInfo.targetTunnelId = targetTunnelId;
 
     try {
-      ws.send(FrameCodec.buildFrame(PROTO.TYPE.TCP_CONNECT, 0, Buffer.from(JSON.stringify({ port }))), {
+      ws.send(FrameCodec.buildFrame(PROTO.TYPE.TCP_CONNECT, 0, Buffer.from(JSON.stringify(connectInfo))), {
         binary: true,
       });
-      logVerbose('agent', 'tcp_connect_sent', { port });
+      logVerbose('agent', 'tcp_connect_sent', {
+        localPort,
+        targetPort,
+        ...(targetTunnelId ? { targetTunnelId } : {}),
+        requestId,
+      });
     } catch {
       removePending();
       socket.destroy();
@@ -204,29 +244,28 @@ function createLocalListener(port) {
   });
 
   server.on('error', (err) => {
-    logError('agent', 'listener_error', { port, message: err.message });
+    logError('agent', 'listener_error', { port: localPort, message: err.message });
     if (!ready) {
-      // A listener that fails to bind before readiness is a fatal candidate
-      // startup failure: the installer must never see SUCCESS when a requested
-      // port is not actually listening.
       clearReady();
       shutdown(1);
     } else {
-      // A listener failing after readiness must not leave a stale ready file.
       clearReady();
     }
   });
 
   server.on('close', () => {
-    // A listener that closed unexpectedly (outside an intentional shutdown)
-    // invalidates readiness: a requested port is no longer served.
-    listeningPorts.delete(port);
+    listeningPorts.delete(localPort);
     clearReady();
   });
 
-  server.listen(port, BIND_HOST, () => {
-    logStandard('agent', 'listening', { bind_host: BIND_HOST, port });
-    listeningPorts.add(port);
+  server.listen(localPort, BIND_HOST, () => {
+    logStandard('agent', 'listening', {
+      bind_host: BIND_HOST,
+      port: localPort,
+      target_port: targetPort,
+      ...(targetTunnelId ? { target_tunnel_id: targetTunnelId } : {}),
+    });
+    listeningPorts.add(localPort);
     markReadyIfEligible();
   });
 
@@ -237,8 +276,9 @@ function createLocalListener(port) {
 // Stream lifecycle
 // ---------------------------------------------------------------------------
 
-function registerStream(streamId, socket, port) {
+function registerStream(streamId, socket, route) {
   if (!socket || socket.destroyed) return;
+  const port = route.localPort;
   const entry = {
     socket,
     streamId,
@@ -460,32 +500,58 @@ function handleConnectAck(streamId, payload) {
     return;
   }
 
-  const idx = pendingConnects.findIndex((entry) => entry.port === Number(info.port));
+  const requestId = Number(info.requestId);
+  const idx =
+    Number.isSafeInteger(requestId) && requestId > 0
+      ? pendingConnects.findIndex((entry) => entry.requestId === requestId)
+      : pendingConnects.findIndex(
+          (entry) =>
+            entry.targetPort === Number(info.port) &&
+            (!info.targetTunnelId || entry.targetTunnelId === String(info.targetTunnelId)),
+        );
+
   if (idx === -1) return;
 
   const [entry] = pendingConnects.splice(idx, 1);
-  registerStream(streamId, entry.localSocket, entry.port);
-  logVerbose('agent', 'connect_ack_received', { port: entry.port, streamId });
+  registerStream(streamId, entry.localSocket, entry);
+  logVerbose('agent', 'connect_ack_received', {
+    localPort: entry.localPort,
+    targetPort: entry.targetPort,
+    ...(entry.targetTunnelId ? { targetTunnelId: entry.targetTunnelId } : {}),
+    requestId: entry.requestId,
+    streamId,
+  });
 }
 
 function handleConnectReject(payload) {
   let info = {};
   try {
     info = FrameCodec.parseJsonPayload(payload);
-  } catch {
-    /* ignore */
-  }
+  } catch {}
 
-  const idx = pendingConnects.findIndex((entry) => entry.port === Number(info.port));
+  const requestId = Number(info.requestId);
+  const idx =
+    Number.isSafeInteger(requestId) && requestId > 0
+      ? pendingConnects.findIndex((entry) => entry.requestId === requestId)
+      : pendingConnects.findIndex(
+          (entry) =>
+            entry.targetPort === Number(info.port) &&
+            (!info.targetTunnelId || entry.targetTunnelId === String(info.targetTunnelId)),
+        );
+
   if (idx === -1) return;
 
   const [entry] = pendingConnects.splice(idx, 1);
-  logVerbose('agent', 'connect_rejected', { port: info.port, message: info.message || '' });
+  logVerbose('agent', 'connect_rejected', {
+    localPort: entry.localPort,
+    targetPort: entry.targetPort,
+    ...(entry.targetTunnelId ? { targetTunnelId: entry.targetTunnelId } : {}),
+    requestId: entry.requestId,
+    message: info.message || '',
+  });
   try {
     entry.localSocket.destroy();
-  } catch {
-    // ignore
-  }
+  } catch {}
 }
 
 // ---------------------------------------------------------------------------
@@ -620,12 +686,14 @@ process.on('SIGINT', shutdown);
 
 logStandard('agent', 'start', {
   server_url: SERVER_URL,
-  ports: AGENT_PORTS.join(','),
+  routes: ROUTES.map(
+    (route) => `${route.localPort}->${route.targetTunnelId ? `${route.targetTunnelId}:` : ''}${route.targetPort}`,
+  ).join(','),
   bind_host: BIND_HOST,
 });
 
-for (const port of AGENT_PORTS) {
-  createLocalListener(port);
+for (const route of ROUTES) {
+  createLocalListener(route);
 }
 
 connect();

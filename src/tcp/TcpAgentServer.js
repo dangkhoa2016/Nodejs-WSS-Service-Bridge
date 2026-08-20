@@ -1,5 +1,6 @@
 import { logVerbose } from '../shared/logger.js';
 import { FrameCodec, PROTO, sendJsonFrame } from '../shared/protocol.js';
+import { normalizeTunnelId } from '../shared/tunnel-id.js';
 import { syncTcpBackpressure } from './TcpFlowControl.js';
 
 export class TcpAgentServer {
@@ -116,37 +117,62 @@ export class TcpAgentServer {
     } catch {
       /* ignore */
     }
+
     const port = Number(info.port);
+    const requestId = Number(info.requestId);
+    const hasRequestId = Number.isSafeInteger(requestId) && requestId > 0;
+
+    let targetTunnelId = '';
+    try {
+      targetTunnelId = normalizeTunnelId(info.targetTunnelId || '', { name: 'targetTunnelId' });
+    } catch (err) {
+      const body = { message: err.message };
+      if (hasRequestId) body.requestId = requestId;
+      if (Number.isInteger(port)) body.port = port;
+      sendJsonFrame(ws, PROTO.TYPE.TCP_ABORT, 0, body);
+      return;
+    }
+
+    const reject = (message) => {
+      const body = { message };
+      if (hasRequestId || targetTunnelId) {
+        if (Number.isInteger(port)) body.port = port;
+        if (hasRequestId) body.requestId = requestId;
+        if (targetTunnelId) body.targetTunnelId = targetTunnelId;
+      }
+      sendJsonFrame(ws, PROTO.TYPE.TCP_ABORT, 0, body);
+    };
 
     if (!Number.isInteger(port) || !this.allowedPorts.includes(port)) {
-      sendJsonFrame(ws, PROTO.TYPE.TCP_ABORT, 0, { message: 'Port not allowed' });
+      reject('Port not allowed');
       return;
     }
 
     const currentCount = this._connCountByPort.get(port) || 0;
     if (this.maxConnectionsPerPort > 0 && currentCount >= this.maxConnectionsPerPort) {
-      sendJsonFrame(ws, PROTO.TYPE.TCP_ABORT, 0, { message: 'Per-port connection limit reached' });
+      reject('Per-port connection limit reached');
       return;
     }
 
     const owned = this._agentStreams.get(ws);
     if (this.maxStreamsPerAgent > 0 && owned.size >= this.maxStreamsPerAgent) {
-      sendJsonFrame(ws, PROTO.TYPE.TCP_ABORT, 0, { message: 'Agent stream limit reached' });
+      reject('Agent stream limit reached');
       return;
     }
 
-    const result = this.tcpRouter.createAgentStream({ agentWs: ws, port });
+    const result = this.tcpRouter.createAgentStream({ agentWs: ws, port, targetTunnelId });
     if (result.error) {
-      sendJsonFrame(ws, PROTO.TYPE.TCP_ABORT, 0, { message: result.error });
+      reject(result.error);
       return;
     }
 
-    // Defer TCP_CONNECT_ACK until the tunnel client confirms TCP_OPEN
-    // (TCP_OPEN_ACK). This closes the race where the agent starts sending
-    // TCP_DATA for a stream the client ended up rejecting.
+    result.state.connectRequestId = hasRequestId ? requestId : null;
     result.state.onClientOpenConfirmed = () => {
       if (!result.state.cleaned) {
-        sendJsonFrame(ws, PROTO.TYPE.TCP_CONNECT_ACK, result.streamId, { port });
+        const body = { port };
+        if (hasRequestId) body.requestId = requestId;
+        if (result.targetTunnelId) body.targetTunnelId = result.targetTunnelId;
+        sendJsonFrame(ws, PROTO.TYPE.TCP_CONNECT_ACK, result.streamId, body);
       }
     };
 

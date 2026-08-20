@@ -1,3 +1,5 @@
+import { normalizeTunnelId } from './tunnel-id.js';
+
 /**
  * Strict AGENT_PORTS parser for tcp-agent.js.
  *
@@ -52,4 +54,61 @@ export function parseAgentPorts(raw) {
   }
 
   return ports;
+}
+
+function parseRoutePort(raw, label) {
+  const token = String(raw || '').trim();
+  if (!/^\d+$/.test(token)) {
+    throw new Error(`AGENT_ROUTES contains a non-numeric ${label}: ${token}`);
+  }
+  const port = Number(token);
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`AGENT_ROUTES ${label} out of range: ${token}`);
+  }
+  return port;
+}
+
+/**
+ * Parse AGENT_ROUTES entries:
+ *   localPort=targetTunnelId:targetPort
+ */
+export function parseAgentRoutes(raw) {
+  if (typeof raw !== 'string' || !raw.trim()) {
+    throw new Error('AGENT_ROUTES is required');
+  }
+
+  const routes = [];
+  const seenLocalPorts = new Set();
+
+  for (const rawEntry of raw.split(',')) {
+    const entry = rawEntry.trim();
+    if (!entry) throw new Error('AGENT_ROUTES contains an empty entry');
+
+    const eq = entry.indexOf('=');
+    if (eq <= 0 || eq === entry.length - 1) {
+      throw new Error(`AGENT_ROUTES entry must use localPort=targetTunnelId:targetPort: ${entry}`);
+    }
+
+    const localPort = parseRoutePort(entry.slice(0, eq), 'local port');
+    if (seenLocalPorts.has(localPort)) {
+      throw new Error(`AGENT_ROUTES contains duplicate local port: ${localPort}`);
+    }
+
+    const targetSpec = entry.slice(eq + 1).trim();
+    const colon = targetSpec.lastIndexOf(':');
+    if (colon <= 0 || colon === targetSpec.length - 1) {
+      throw new Error(`AGENT_ROUTES target must use targetTunnelId:targetPort: ${targetSpec}`);
+    }
+
+    const targetTunnelId = normalizeTunnelId(targetSpec.slice(0, colon), {
+      name: 'AGENT_ROUTES target tunnel ID',
+      required: true,
+    });
+    const targetPort = parseRoutePort(targetSpec.slice(colon + 1), 'target port');
+
+    seenLocalPorts.add(localPort);
+    routes.push({ localPort, targetTunnelId, targetPort });
+  }
+
+  return routes;
 }
