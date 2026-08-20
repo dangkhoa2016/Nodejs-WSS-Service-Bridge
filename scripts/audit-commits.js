@@ -6,6 +6,7 @@ const MAX_CHURN = 3000;
 
 const SUBJECT_PATTERN =
   /^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([a-z0-9-]+\))?!?: .+$/;
+const GITHUB_PR_MERGE_SUBJECT_PATTERN = /^Merge pull request #\d+ from [A-Za-z0-9_.-]+\/.+$/;
 
 const TRAILER_PATTERN = /^[A-Za-z0-9-]+: .+$/;
 
@@ -65,9 +66,21 @@ function git(args) {
 export function auditCommit(sha) {
   const subject = git(['show', '-s', '--format=%s', sha]).replace(/\n$/, '');
   const body = git(['show', '-s', '--format=%b', sha]);
+  const parents = git(['show', '-s', '--format=%P', sha])
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
   const numstat = git(['show', '--numstat', '--format=', sha]);
 
-  const diagnostics = [...validateSubject(subject), ...validateBody(body)];
+  const isGithubPullRequestMerge =
+    parents.length > 1 && GITHUB_PR_MERGE_SUBJECT_PATTERN.test(subject);
+
+  // GitHub generates the wrapper message for standard pull-request merges.
+  // Reachable commits remain audited individually, so only the real merge
+  // wrapper is exempt from subject/body message-shape validation.
+  const diagnostics = isGithubPullRequestMerge
+    ? []
+    : [...validateSubject(subject), ...validateBody(body)];
 
   const churn = parseNumstat(numstat);
   if (churn >= MAX_CHURN) {

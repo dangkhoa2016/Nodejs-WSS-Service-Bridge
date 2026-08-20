@@ -28,15 +28,38 @@ async function waitFor(cond, timeout = 5000, interval = 50) {
 
 function waitForAgentListening(proc, port, timeout = 10000) {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('timeout waiting for agent listener')), timeout);
-    const onData = (buf) => {
-      if (buf.toString().includes(`port=${port}`)) {
-        clearTimeout(timer);
-        proc.stdout.removeListener('data', onData);
-        resolve();
-      }
+    const marker = `port=${port}`;
+    let settled = false;
+
+    const cleanup = () => {
+      clearTimeout(timer);
+      proc.stdout.removeListener('data', onData);
+      proc.removeListener('exit', onExit);
     };
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve();
+    };
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    const onData = (buf) => {
+      if (buf.toString().includes(marker)) finish();
+    };
+    const onExit = (code) => {
+      fail(new Error(`agent exited before listener was ready (code=${code})`));
+    };
+    const timer = setTimeout(() => fail(new Error('timeout waiting for agent listener')), timeout);
+
     proc.stdout.on('data', onData);
+    proc.once('exit', onExit);
+
+    if (proc.agentStdout?.includes(marker)) finish();
   });
 }
 
@@ -116,7 +139,7 @@ function createMockWsServer({ echo = true, autoAck = true, onAuth } = {}) {
 }
 
 function spawnAgent({ mockPort, agentPort, reconnectDelay = 200, env = {} }) {
-  return spawn('node', ['serve/tcp-agent.js'], {
+  const proc = spawn('node', ['serve/tcp-agent.js'], {
     env: {
       ...process.env,
       NODE_ENV: 'test',
@@ -131,6 +154,15 @@ function spawnAgent({ mockPort, agentPort, reconnectDelay = 200, env = {} }) {
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+
+  // Capture stdout immediately after spawn so readiness emitted before a test
+  // attaches its waiter cannot be lost.
+  proc.agentStdout = '';
+  proc.stdout.on('data', (buf) => {
+    proc.agentStdout += buf.toString();
+  });
+
+  return proc;
 }
 
 function connectSocket(port) {
