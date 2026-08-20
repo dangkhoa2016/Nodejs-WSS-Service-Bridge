@@ -6,6 +6,7 @@ const MAX_CHURN = 3000;
 
 const SUBJECT_PATTERN =
   /^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([a-z0-9-]+\))?!?: .+$/;
+const GITHUB_PR_MERGE_SUBJECT_PATTERN = /^Merge pull request #\d+ from [A-Za-z0-9_.-]+\/.+$/;
 
 const TRAILER_PATTERN = /^[A-Za-z0-9-]+: .+$/;
 
@@ -16,8 +17,8 @@ export function validateSubject(subject) {
     diagnostics.push(`Subject is too long (${subject.length} characters; max ${MAX_SUBJECT_LENGTH})`);
   }
 
-  if (!SUBJECT_PATTERN.test(subject)) {
-    diagnostics.push('Subject is not a valid Conventional Commit');
+  if (!SUBJECT_PATTERN.test(subject) && !GITHUB_PR_MERGE_SUBJECT_PATTERN.test(subject)) {
+    diagnostics.push('Subject is not a valid Conventional Commit or GitHub pull request merge subject');
   }
 
   return diagnostics;
