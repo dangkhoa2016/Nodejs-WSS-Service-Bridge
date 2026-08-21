@@ -70,17 +70,27 @@ export function auditCommit(sha) {
     .trim()
     .split(/\s+/)
     .filter(Boolean);
+  const authorName = git(['show', '-s', '--format=%an', sha]).trim();
+  const authorEmail = git(['show', '-s', '--format=%ae', sha]).trim();
   const numstat = git(['show', '--numstat', '--format=', sha]);
 
   const isGithubPullRequestMerge =
     parents.length > 1 && GITHUB_PR_MERGE_SUBJECT_PATTERN.test(subject);
+  const isDependabotDependencyCommit =
+    /^build\(deps(?:-dev)?\): bump /.test(subject) &&
+    authorName === 'dependabot[bot]' &&
+    /^\d+\+dependabot\[bot\]@users\.noreply\.github\.com$/.test(authorEmail);
 
   // GitHub generates the wrapper message for standard pull-request merges.
-  // Reachable commits remain audited individually, so only the real merge
-  // wrapper is exempt from subject/body message-shape validation.
+  // Dependabot also generates structured dependency metadata in commit bodies
+  // that intentionally does not follow the repository's bullet-only body
+  // convention. In both cases, the generated surface is narrowly identified;
+  // subject validation and churn limits still apply to Dependabot commits.
   const diagnostics = isGithubPullRequestMerge
     ? []
-    : [...validateSubject(subject), ...validateBody(body)];
+    : isDependabotDependencyCommit
+      ? validateSubject(subject)
+      : [...validateSubject(subject), ...validateBody(body)];
 
   const churn = parseNumstat(numstat);
   if (churn >= MAX_CHURN) {
