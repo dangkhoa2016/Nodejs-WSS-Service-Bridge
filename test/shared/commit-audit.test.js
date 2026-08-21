@@ -159,6 +159,56 @@ describe('auditRange integration', () => {
     assert.match(churnViolation, /3000-line threshold/);
   });
 
+  it('accepts generated Dependabot dependency metadata from the real bot identity', () => {
+    const dir = makeRepo();
+    writeFileSync(join(dir, 'base.txt'), 'x\n');
+    const base = commitAll(dir, 'feat: base setup');
+
+    git(dir, ['config', 'user.name', 'dependabot[bot]']);
+    git(dir, ['config', 'user.email', '49699333+dependabot[bot]@users.noreply.github.com']);
+    writeFileSync(join(dir, 'package.json'), '{"devDependencies":{"dotenv":"^18.0.1"}}\n');
+    commitAll(
+      dir,
+      'build(deps-dev): bump dotenv from 17.4.2 to 18.0.1',
+      [
+        'Bumps [dotenv](https://github.com/motdotla/dotenv) from 17.4.2 to 18.0.1.',
+        '- [Changelog](https://github.com/motdotla/dotenv/blob/master/CHANGELOG.md)',
+        '',
+        '---',
+        'updated-dependencies:',
+        '- dependency-name: dotenv',
+        '  dependency-version: 18.0.1',
+        '  dependency-type: direct:development',
+        '  update-type: version-update:semver-major',
+        '...',
+        '',
+        'Signed-off-by: dependabot[bot] <support@github.com>',
+      ].join('\n'),
+    );
+
+    const head = git(dir, ['rev-parse', 'HEAD']);
+    const result = inRepo(dir, () => auditRange(base, head));
+    assert.deepEqual(result.violations, []);
+  });
+
+  it('does not exempt Dependabot-looking metadata from a regular author', () => {
+    const dir = makeRepo();
+    writeFileSync(join(dir, 'base.txt'), 'x\n');
+    const base = commitAll(dir, 'feat: base setup');
+
+    writeFileSync(join(dir, 'package.json'), '{"devDependencies":{"dotenv":"^18.0.1"}}\n');
+    commitAll(
+      dir,
+      'build(deps-dev): bump dotenv from 17.4.2 to 18.0.1',
+      'Bumps [dotenv](https://github.com/motdotla/dotenv) from 17.4.2 to 18.0.1.',
+    );
+
+    const head = git(dir, ['rev-parse', 'HEAD']);
+    const result = inRepo(dir, () => auditRange(base, head));
+    assert.equal(result.violations.length, 1);
+    assert.match(result.violations[0], /bullet or trailer/);
+  });
+
   it('accepts a GitHub pull request subject only on a real merge commit', () => {
     const dir = makeRepo();
     writeFileSync(join(dir, 'base.txt'), 'x\n');
