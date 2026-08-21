@@ -173,6 +173,7 @@ There are two ways to run the client: via `setup.sh` (recommended, atomic upgrad
 TUNNEL_SERVER_URL=wss://your-server.example.com/tunnel \
 TUNNEL_USERNAME=admin \
 TUNNEL_PASSWORD=your_strong_secret \
+TUNNEL_ID=kaggle-1 \
 TCP_TUNNEL_HOST=127.0.0.1 \
 TCP_CLIENT_ALLOWED_HOSTS=127.0.0.1 \
 node serve/client.js
@@ -261,12 +262,14 @@ npm install --omit=dev
 | `TUNNEL_SERVER_URL` | ✅ | WebSocket URL of the server **with the agent path**, e.g. `wss://your-server.example.com/tcp` |
 | `TUNNEL_USERNAME` / `TUNNEL_PASSWORD` | ✅ | Same values as on the server (Basic Auth) |
 | `AGENT_BIND_HOST` | | Interface the agent listens on for local TCP connections (default `127.0.0.1`) |
-| `AGENT_PORTS` | ✅ | Comma-separated local ports the agent exposes, e.g. `6379` |
+| `AGENT_PORTS` | conditional | Legacy/single-target mode: comma-separated local ports; remote target port is the same value |
+| `TARGET_TUNNEL_ID` | | Optional target selector used with `AGENT_PORTS` |
+| `AGENT_ROUTES` | conditional | Multi-target mappings in `localPort=targetTunnelId:targetPort` form; mutually exclusive with `AGENT_PORTS` |
 | `AGENT_USERNAME` / `AGENT_PASSWORD` | | Agent WS credentials; fall back to `TUNNEL_USERNAME` / `TUNNEL_PASSWORD` when unset |
 
-> The agent exits with an error if `TUNNEL_SERVER_URL`, credentials
-> (`AGENT_USERNAME`/`AGENT_PASSWORD` or `TUNNEL_USERNAME`/`TUNNEL_PASSWORD`),
-> or `AGENT_PORTS` are missing.
+> The agent exits with an error if `TUNNEL_SERVER_URL` or credentials
+> (`AGENT_USERNAME`/`AGENT_PASSWORD` or `TUNNEL_USERNAME`/`TUNNEL_PASSWORD`) are missing.
+> Configure exactly one routing mode: `AGENT_PORTS` or `AGENT_ROUTES`.
 
 ```bash
 TUNNEL_SERVER_URL=wss://your-server.example.com/tcp \
@@ -315,6 +318,47 @@ redis-cli -h 127.0.0.1 -p 6379 ping
 ```
 
 Direct mode (`TCP_TUNNEL_PORTS` on the server) remains the standard choice for VPS deployments; both modes can coexist on the same server.
+
+### 5.7 Multi-target SSH through one Northflank service
+
+For SSH, run `sshd` on each target notebook bound to loopback (for example `127.0.0.1:2222`). Each tunnel client registers a distinct ID:
+
+```env
+# Kaggle 1
+TUNNEL_SERVER_URL=wss://your-service.code.run/tunnel
+TUNNEL_ID=kaggle-1
+
+# Kaggle 2
+TUNNEL_SERVER_URL=wss://your-service.code.run/tunnel
+TUNNEL_ID=kaggle-2
+
+# Colab 1
+TUNNEL_SERVER_URL=wss://your-service.code.run/tunnel
+TUNNEL_ID=colab-1
+```
+
+The single-port server should allow all intended targets and SSH port 2222:
+
+```env
+MAX_TUNNEL_CLIENTS=5
+TCP_AGENT_ALLOWED_PORTS=2222
+STREAM_IDLE_TIMEOUT_MS=0
+```
+
+One local TCP agent can then expose a different loopback port for each target:
+
+```env
+TUNNEL_SERVER_URL=wss://your-service.code.run/tcp
+AGENT_ROUTES=22001=kaggle-1:2222,22002=kaggle-2:2222,22003=colab-1:2222
+```
+
+```bash
+ssh -p 22001 user@127.0.0.1
+ssh -p 22002 user@127.0.0.1
+ssh -p 22003 user@127.0.0.1
+```
+
+Routing is fail-closed: if more than one tunnel client is online and the agent does not name a target, the server rejects the request instead of selecting an arbitrary client. A duplicate live `TUNNEL_ID` is also rejected. `STREAM_IDLE_TIMEOUT_MS=0` disables stream idle expiry and is appropriate for long-lived SSH sessions; SSH keepalives and `tmux`/screen remain useful because a WebSocket disconnect terminates active TCP streams.
 
 ---
 

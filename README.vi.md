@@ -309,7 +309,7 @@ docker run -d --restart=unless-stopped -p 7860:7860 \
 
 Client (ví dụ: trên Google Colab hoặc máy cục bộ) kết nối đến Server qua script `setup.sh`:
 
-> Mặc định máy chủ chỉ chấp nhận **một** tunnel client tại một thời điểm; đặt `MAX_TUNNEL_CLIENTS` để cho phép nhiều hơn. Client vượt quá giới hạn bị từ chối với mã đóng `1013`.
+> Mặc định máy chủ chỉ chấp nhận **một** tunnel client tại một thời điểm; đặt `MAX_TUNNEL_CLIENTS` để cho phép nhiều hơn. Khi cần định tuyến TCP nhiều target một cách xác định, hãy đặt `TUNNEL_ID` duy nhất cho từng client, ví dụ `kaggle-1`, `kaggle-2`, hoặc `colab-1`. ID đang hoạt động bị trùng sẽ bị từ chối; nếu có nhiều tunnel client mà TCP agent không chỉ rõ target thì yêu cầu cũng bị từ chối.
 
 **Yêu cầu trên máy client:** `curl`, `node` (>= 20), `npm`, `mv` hỗ trợ GNU `-T`
 
@@ -327,6 +327,7 @@ curl -fsSL https://<your-server-host>/<uuid>-install | bash
 TUNNEL_SERVER_URL=wss://your-server-host/tunnel \
 TUNNEL_USERNAME=admin \
 TUNNEL_PASSWORD=secret \
+TUNNEL_ID=kaggle-1 \
 TARGET_ORIGIN=http://127.0.0.1:8000 \
 curl -fsSL https://your-server-host/<uuid>-install | bash
 ```
@@ -369,6 +370,47 @@ Rails -- 127.0.0.1:6379 --> tcp-agent.js -- WS /tcp --> Server -- WS /tunnel -->
 Endpoint `/tcp` chỉ tồn tại khi `TCP_AGENT_ALLOWED_PORTS` không rỗng. Nó được bảo vệ bằng Basic Auth (mặc định dùng thông tin đăng nhập tunnel, có thể ghi đè bằng `TCP_AGENT_USERNAME`/`TCP_AGENT_PASSWORD`) và hỗ trợ tùy chọn danh sách trắng Origin (`TCP_AGENT_ALLOWED_ORIGINS`) cùng kiểm tra TLS (`TCP_AGENT_REQUIRE_TLS`, tin tưởng tiêu đề `X-Forwarded-Proto: https` chỉ từ các proxy liệt kê trong `TCP_AGENT_TRUSTED_PROXIES`). Bundle agent được phân phối tại `/${INSTALL_UUID}-tcp-agent.js` kèm manifest tối thiểu tại `/${INSTALL_UUID}-tcp-agent-package.json`.
 
 Hai chế độ có thể cùng tồn tại trên một máy chủ. Xem [docs/tcp-tunnel.vi.md](docs/tcp-tunnel.vi.md) để có hướng dẫn cấu hình đầy đủ và ví dụ Rails/Redis.
+
+### SSH nhiều target qua một endpoint công khai
+
+Một endpoint WebSocket công khai có thể định tuyến nhiều cổng TCP local đến các tunnel client khác nhau. Mô hình này phù hợp khi một dịch vụ Northflank đứng trước nhiều notebook Kaggle/Colab.
+
+Ví dụ cấu hình server:
+
+```env
+MAX_TUNNEL_CLIENTS=5
+TCP_AGENT_ALLOWED_PORTS=2222
+STREAM_IDLE_TIMEOUT_MS=0
+```
+
+Mỗi target dùng cùng URL `/tunnel` nhưng đăng ký ID khác nhau:
+
+```env
+# Kaggle notebook 1
+TUNNEL_SERVER_URL=wss://your-service.code.run/tunnel
+TUNNEL_ID=kaggle-1
+
+# Kaggle notebook 2
+TUNNEL_SERVER_URL=wss://your-service.code.run/tunnel
+TUNNEL_ID=kaggle-2
+```
+
+Trên máy local, một TCP agent có thể mở nhiều cổng loopback:
+
+```env
+TUNNEL_SERVER_URL=wss://your-service.code.run/tcp
+AGENT_ROUTES=22001=kaggle-1:2222,22002=kaggle-2:2222,22003=colab-1:2222
+```
+
+Sau đó có thể mở các terminal riêng:
+
+```bash
+ssh -p 22001 user@127.0.0.1
+ssh -p 22002 user@127.0.0.1
+ssh -p 22003 user@127.0.0.1
+```
+
+`AGENT_ROUTES` có cú pháp `localPort=targetTunnelId:targetPort` và không dùng đồng thời với `AGENT_PORTS`. Với chế độ agent một target, vẫn dùng `AGENT_PORTS` và có thể đặt thêm `TARGET_TUNNEL_ID`.
 
 ---
 
