@@ -154,7 +154,17 @@ wait_for_readiness() {
 # --- Start the client as a background process ---
 start_client() {
   local release_path="$1"
+  local -a session_launcher=()
   rm -f "$READY_FILE"
+
+  # Kaggle notebook runtimes may reap processes that remain attached to the
+  # installer/cell session. Start a new session when setsid is available while
+  # preserving $! as the real client PID. Detached stdin is required in both
+  # the setsid and portable fallback paths.
+  if command -v setsid >/dev/null 2>&1; then
+    session_launcher=(setsid)
+  fi
+
   TUNNEL_SERVER_URL="$WS_URL" \
   TUNNEL_USERNAME="$USERNAME" \
   TUNNEL_PASSWORD="$PASSWORD" \
@@ -162,7 +172,8 @@ start_client() {
   TUNNEL_ID="$TUNNEL_ID" \
   TUNNEL_READY_FILE="$READY_FILE" \
   TUNNEL_CAPTURE_FILE="${TUNNEL_CAPTURE_FILE:-}" \
-    nohup node "${release_path}/client.js" \
+    "${session_launcher[@]}" nohup node "${release_path}/client.js" \
+    </dev/null \
     > "${WORK_DIR}/client.log" 2>&1 &
   CLIENT_PID=$!
   printf '%s\n' "$CLIENT_PID" > "${WORK_DIR}/client.pid"
