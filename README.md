@@ -309,7 +309,7 @@ docker run -d --restart=unless-stopped -p 7860:7860 \
 
 The Client (e.g., on Google Colab or local machine) connects to the Server via the `setup.sh` script:
 
-> By default the server accepts **one** tunnel client at a time; set `MAX_TUNNEL_CLIENTS` to allow more. Clients beyond the limit are rejected with close code `1013`.
+> By default the server accepts **one** tunnel client at a time; set `MAX_TUNNEL_CLIENTS` to allow more. For deterministic multi-target TCP routing, give each client a unique `TUNNEL_ID` such as `kaggle-1`, `kaggle-2`, or `colab-1`. Duplicate live IDs are rejected, and an unqualified TCP-agent request is rejected when multiple tunnel clients are connected.
 
 **Requirements on the client machine:** `curl`, `node` (>= 20), `npm`, `mv` with GNU `-T` support
 
@@ -327,6 +327,7 @@ curl -fsSL https://<your-server-host>/<uuid>-install | bash
 TUNNEL_SERVER_URL=wss://your-server-host/tunnel \
 TUNNEL_USERNAME=admin \
 TUNNEL_PASSWORD=secret \
+TUNNEL_ID=kaggle-1 \
 TARGET_ORIGIN=http://127.0.0.1:8000 \
 curl -fsSL https://your-server-host/<uuid>-install | bash
 ```
@@ -369,6 +370,47 @@ Rails -- 127.0.0.1:6379 --> tcp-agent.js -- WS /tcp --> Server -- WS /tunnel -->
 The `/tcp` endpoint only exists when `TCP_AGENT_ALLOWED_PORTS` is non-empty. It is protected by Basic Auth (defaults to the tunnel credentials, overridable with `TCP_AGENT_USERNAME`/`TCP_AGENT_PASSWORD`) and supports optional Origin allowlisting (`TCP_AGENT_ALLOWED_ORIGINS`) and TLS enforcement (`TCP_AGENT_REQUIRE_TLS`, trusting `X-Forwarded-Proto: https` only from proxies listed in `TCP_AGENT_TRUSTED_PROXIES`). The agent bundle is served at `/${INSTALL_UUID}-tcp-agent.js` with a minimal manifest at `/${INSTALL_UUID}-tcp-agent-package.json`.
 
 Both modes can coexist on the same server. See [docs/tcp-tunnel.md](docs/tcp-tunnel.md) for the full configuration guide and Rails/Redis examples.
+
+### Multi-target SSH over one public endpoint
+
+A single public WebSocket endpoint can route different local TCP listeners to different tunnel clients. This is useful when one Northflank service fronts multiple Kaggle/Colab notebooks.
+
+Server example:
+
+```env
+MAX_TUNNEL_CLIENTS=5
+TCP_AGENT_ALLOWED_PORTS=2222
+STREAM_IDLE_TIMEOUT_MS=0
+```
+
+Each target connects to the same `/tunnel` URL but registers a different ID:
+
+```env
+# Kaggle notebook 1
+TUNNEL_SERVER_URL=wss://your-service.code.run/tunnel
+TUNNEL_ID=kaggle-1
+
+# Kaggle notebook 2
+TUNNEL_SERVER_URL=wss://your-service.code.run/tunnel
+TUNNEL_ID=kaggle-2
+```
+
+On the local machine, one TCP agent can expose several loopback ports:
+
+```env
+TUNNEL_SERVER_URL=wss://your-service.code.run/tcp
+AGENT_ROUTES=22001=kaggle-1:2222,22002=kaggle-2:2222,22003=colab-1:2222
+```
+
+Then separate terminals can connect through the same public endpoint:
+
+```bash
+ssh -p 22001 user@127.0.0.1
+ssh -p 22002 user@127.0.0.1
+ssh -p 22003 user@127.0.0.1
+```
+
+`AGENT_ROUTES` uses `localPort=targetTunnelId:targetPort`. It is mutually exclusive with `AGENT_PORTS`. For single-target agent mode, keep using `AGENT_PORTS` and optionally set `TARGET_TUNNEL_ID`.
 
 ---
 

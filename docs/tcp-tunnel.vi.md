@@ -161,6 +161,7 @@ Có hai cách chạy client: dùng `setup.sh` (khuyên dùng, có cập nhật n
 |------|----------|-------|
 | `TUNNEL_SERVER_URL` | ✅ | Địa chỉ WebSocket tới máy chủ, VD `wss://your-server.example.com/tunnel` |
 | `TUNNEL_USERNAME` / `TUNNEL_PASSWORD` | ✅ | Giống giá trị trên server |
+| `TUNNEL_ID` | | ID target ổn định dùng cho định tuyến nhiều target xác định; rất nên đặt khi `MAX_TUNNEL_CLIENTS > 1` |
 | `TCP_TUNNEL_HOST` | | Host dịch vụ local mà client dial tới (mặc định `127.0.0.1`) |
 | `TCP_CLIENT_ALLOWED_HOSTS` | | Hosts client được phép dial (mặc định `TCP_TUNNEL_HOST`) |
 | `TCP_CONNECT_TIMEOUT_MS` | | Timeout dial kết nối local (mặc định `10000`) |
@@ -173,6 +174,7 @@ Có hai cách chạy client: dùng `setup.sh` (khuyên dùng, có cập nhật n
 TUNNEL_SERVER_URL=wss://your-server.example.com/tunnel \
 TUNNEL_USERNAME=admin \
 TUNNEL_PASSWORD=your_strong_secret \
+TUNNEL_ID=kaggle-1 \
 TCP_TUNNEL_HOST=127.0.0.1 \
 TCP_CLIENT_ALLOWED_HOSTS=127.0.0.1 \
 node serve/client.js
@@ -261,12 +263,14 @@ npm install --omit=dev
 | `TUNNEL_SERVER_URL` | ✅ | Địa chỉ WebSocket tới server **kèm path của agent**, VD `wss://your-server.example.com/tcp` |
 | `TUNNEL_USERNAME` / `TUNNEL_PASSWORD` | ✅ | Giống giá trị trên server (Basic Auth) |
 | `AGENT_BIND_HOST` | | Interface agent lắng nghe các kết nối TCP local (mặc định `127.0.0.1`) |
-| `AGENT_PORTS` | ✅ | Danh sách cổng local agent expose, phân tách bằng dấu phẩy, VD `6379` |
+| `AGENT_PORTS` | có điều kiện | Chế độ cũ/một target: danh sách cổng local; port target từ xa dùng cùng giá trị |
+| `TARGET_TUNNEL_ID` | | Target tùy chọn dùng cùng `AGENT_PORTS` |
+| `AGENT_ROUTES` | có điều kiện | Mapping nhiều target theo dạng `localPort=targetTunnelId:targetPort`; không dùng đồng thời với `AGENT_PORTS` |
 | `AGENT_USERNAME` / `AGENT_PASSWORD` | | Credentials WS của agent; fallback sang `TUNNEL_USERNAME` / `TUNNEL_PASSWORD` khi không đặt |
 
-> Agent sẽ thoát kèm lỗi nếu thiếu `TUNNEL_SERVER_URL`, credentials
-> (`AGENT_USERNAME`/`AGENT_PASSWORD` hoặc `TUNNEL_USERNAME`/`TUNNEL_PASSWORD`),
-> hoặc `AGENT_PORTS`.
+> Agent sẽ thoát kèm lỗi nếu thiếu `TUNNEL_SERVER_URL` hoặc credentials
+> (`AGENT_USERNAME`/`AGENT_PASSWORD` hoặc `TUNNEL_USERNAME`/`TUNNEL_PASSWORD`).
+> Hãy cấu hình đúng một chế độ định tuyến: `AGENT_PORTS` hoặc `AGENT_ROUTES`.
 
 ```bash
 TUNNEL_SERVER_URL=wss://your-server.example.com/tcp \
@@ -315,6 +319,47 @@ redis-cli -h 127.0.0.1 -p 6379 ping
 ```
 
 Chế độ trực tiếp (`TCP_TUNNEL_PORTS` trên server) vẫn là lựa chọn chuẩn cho VPS; cả hai chế độ có thể cùng tồn tại trên một server.
+
+### 5.7 SSH nhiều target qua một dịch vụ Northflank
+
+Với SSH, chạy `sshd` trên từng notebook target và chỉ bind loopback (ví dụ `127.0.0.1:2222`). Mỗi tunnel client đăng ký một ID riêng:
+
+```env
+# Kaggle 1
+TUNNEL_SERVER_URL=wss://your-service.code.run/tunnel
+TUNNEL_ID=kaggle-1
+
+# Kaggle 2
+TUNNEL_SERVER_URL=wss://your-service.code.run/tunnel
+TUNNEL_ID=kaggle-2
+
+# Colab 1
+TUNNEL_SERVER_URL=wss://your-service.code.run/tunnel
+TUNNEL_ID=colab-1
+```
+
+Server single-port cần cho phép đủ số target và port SSH 2222:
+
+```env
+MAX_TUNNEL_CLIENTS=5
+TCP_AGENT_ALLOWED_PORTS=2222
+STREAM_IDLE_TIMEOUT_MS=0
+```
+
+Một TCP agent trên máy local có thể mở cổng loopback riêng cho từng target:
+
+```env
+TUNNEL_SERVER_URL=wss://your-service.code.run/tcp
+AGENT_ROUTES=22001=kaggle-1:2222,22002=kaggle-2:2222,22003=colab-1:2222
+```
+
+```bash
+ssh -p 22001 user@127.0.0.1
+ssh -p 22002 user@127.0.0.1
+ssh -p 22003 user@127.0.0.1
+```
+
+Định tuyến theo nguyên tắc fail-closed: nếu có nhiều tunnel client đang online mà agent không chỉ rõ target, server sẽ từ chối thay vì chọn ngẫu nhiên một client. `TUNNEL_ID` đang hoạt động bị trùng cũng bị từ chối. `STREAM_IDLE_TIMEOUT_MS=0` tắt idle expiry và phù hợp với SSH chạy lâu; SSH keepalive và `tmux`/screen vẫn hữu ích vì khi WebSocket ngắt thì các TCP stream đang hoạt động cũng kết thúc.
 
 ---
 
