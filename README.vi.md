@@ -192,6 +192,7 @@
 - [Hướng dẫn TCP Tunnel & TCP Agent (Tiếng Việt)](docs/tcp-tunnel.vi.md)
 - [Kết nối ứng dụng bên ngoài với TCP services (Redis) (Tiếng Anh)](docs/guide-external-app-to-tcp-services.md)
 - [Kết nối ứng dụng bên ngoài với TCP services (Redis) (Tiếng Việt)](docs/guide-external-app-to-tcp-services.vi.md)
+- [Báo cáo Qualification Live / Resilience Cuối cùng (2026-08-22)](docs/final-live-qualification-2026-08-22.vi.md)
 
 ---
 
@@ -339,6 +340,8 @@ Các artifact được tải về một thư mục phát hành (release) bất b
 - **Xóa log Client**: `> ~/.tunnel-client/client.log`
 - **Dừng Client**: `kill $(cat ~/.tunnel-client/client.pid)` (trình cài đặt xác minh PID khớp với bundle client trước khi kill; khi dùng tay hãy kiểm tra PID thuộc về `client.js`)
 - **Trạng thái sẵn sàng của Client**: File `client.ready` trong `~/.tunnel-client/` chứa PID của client và chỉ được ghi sau khi client đã mở kết nối WebSocket được xác thực tới endpoint `/tunnel` của máy chủ, và được ghi nguyên tử (temp + rename) nên reader không bao giờ đọc phải nội dung dở dang. File bị xóa khi client ngắt kết nối, xác thực thất bại, hoặc dừng và được ghi lại khi client kết nối lại, nên một file ready cũ không bao giờ báo một tiến trình đã chết hoặc đã ngắt kết nối là khỏe mạnh.
+
+> **Vòng đời notebook/runtime:** official installer tách client khỏi vòng đời installer/notebook cell bằng `setsid` khi có thể, `nohup`, và stdin từ `/dev/null`, đồng thời vẫn giữ PID thật của client dùng cho readiness checks. Cách này bảo vệ khi parent shell/cell kết thúc; nó **không** làm process sống qua full Kaggle runtime, container, host hoặc VM restart. Sau full runtime restart, hãy dựng lại các runtime service cần thiết và chạy lại installer với cùng `TUNNEL_ID`.
 
 ---
 

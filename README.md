@@ -192,6 +192,7 @@ For more detail, see the guides under `docs/`:
 - [TCP Tunnel & TCP Agent Guide (Vietnamese)](docs/tcp-tunnel.vi.md)
 - [Connecting an External App to TCP Services (Redis) (English)](docs/guide-external-app-to-tcp-services.md)
 - [Connecting an External App to TCP Services (Vietnamese)](docs/guide-external-app-to-tcp-services.vi.md)
+- [Final Live / Resilience Qualification Report (2026-08-22)](docs/final-live-qualification-2026-08-22.md)
 
 ---
 
@@ -339,6 +340,8 @@ Artifacts are downloaded into a unique immutable release directory and validated
 - **Clear Client Logs**: `> ~/.tunnel-client/client.log`
 - **Stop Client**: `kill $(cat ~/.tunnel-client/client.pid)` (the installer verifies the PID matches the client bundle before killing; on manual use confirm the PID belongs to `client.js`)
 - **Client Readiness**: The file `client.ready` in `~/.tunnel-client/` contains the client PID and is written only after the client has opened an authenticated WebSocket connection to the server's `/tunnel` endpoint, and is written atomically (temp + rename) so a reader never sees partial content. The file is removed when the client disconnects, fails authentication, or stops and is recreated on reconnect, so a stale ready file never reports a dead or disconnected process as healthy.
+
+> **Notebook/runtime lifecycle:** the official installer detaches the client from the installer/notebook-cell lifecycle using `setsid` when available, `nohup`, and stdin from `/dev/null`, while preserving the real client PID used by readiness checks. This protects against the parent shell/cell ending; it does **not** make the process survive a full Kaggle runtime, container, host, or VM restart. After a full runtime restart, rebuild runtime services as needed and re-run the installer with the same `TUNNEL_ID`.
 
 ---
 
