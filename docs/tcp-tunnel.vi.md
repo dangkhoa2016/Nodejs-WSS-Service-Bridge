@@ -2,6 +2,8 @@
 
 > 🌐 Language / Ngôn ngữ: [English](tcp-tunnel.md) | **Tiếng Việt**
 
+> **Mới dùng dự án?** Hãy bắt đầu với [Use Case 2 — TCP Services](use-case-tcp.vi.md). Tài liệu này là reference triển khai/vận hành nâng cao.
+
 Tài liệu này giúp bạn tạo kết nối TCP đầu tiên rồi gia cố để chạy production.
 ## Chọn chế độ triển khai
 

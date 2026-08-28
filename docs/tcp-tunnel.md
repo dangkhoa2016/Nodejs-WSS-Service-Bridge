@@ -2,6 +2,8 @@
 
 > 🌐 Language / Ngôn ngữ: **English** | [Tiếng Việt](tcp-tunnel.vi.md)
 
+> **New to the project?** Start with [Use Case 2 — TCP Services](use-case-tcp.md). This document is the advanced deployment and operations reference.
+
 Use this guide to get a first TCP tunnel working and then harden it for production.
 ## Choose a deployment mode
 
