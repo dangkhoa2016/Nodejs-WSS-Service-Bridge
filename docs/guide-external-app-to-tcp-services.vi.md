@@ -2,6 +2,8 @@
 
 > Ngôn ngữ: [English](guide-external-app-to-tcp-services.md) | **Tiếng Việt**
 
+> **Mới dùng dự án?** Hãy bắt đầu với [Use Case 2 — TCP Services](use-case-tcp.vi.md). Tài liệu này tập trung vào triển khai application/service nhiều host ở mức nâng cao.
+
 Dùng hướng dẫn này để chia sẻ Redis, PostgreSQL hoặc dịch vụ TCP khác từ một
 máy dịch vụ (Computer A) cho một hoặc nhiều máy ứng dụng (B, C, ...).
 
