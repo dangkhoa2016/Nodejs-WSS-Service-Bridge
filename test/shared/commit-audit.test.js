@@ -234,6 +234,44 @@ describe('auditRange integration', () => {
     assert.deepEqual(result.violations, []);
   });
 
+  it('does not double-count aggregate churn on a generated GitHub PR merge', () => {
+    const dir = makeRepo();
+    writeFileSync(join(dir, 'base.txt'), 'x\n');
+    const base = commitAll(dir, 'feat: base setup');
+
+    git(dir, ['checkout', '-b', 'feature']);
+    writeFileSync(
+      join(dir, 'guide-one.md'),
+      `${Array.from({ length: 1600 }, (_, i) => `guide one line ${i}`).join('\n')}\n`,
+    );
+    commitAll(dir, 'docs: add first guide half');
+
+    writeFileSync(
+      join(dir, 'guide-two.md'),
+      `${Array.from({ length: 1600 }, (_, i) => `guide two line ${i}`).join('\n')}\n`,
+    );
+    commitAll(dir, 'docs: add second guide half');
+
+    git(dir, ['checkout', 'main']);
+    git(dir, [
+      'merge',
+      '--no-ff',
+      'feature',
+      '-m',
+      'Merge pull request #42 from example/feature',
+      '-m',
+      'docs: add large documentation set',
+    ]);
+
+    const head = git(dir, ['rev-parse', 'HEAD']);
+    const mergeChurn = parseNumstat(git(dir, ['show', '--numstat', '--format=', head]));
+    assert.ok(mergeChurn >= 3000, `expected aggregate merge churn >= 3000, got ${mergeChurn}`);
+
+    const result = inRepo(dir, () => auditRange(base, head));
+    assert.equal(result.total, 3);
+    assert.deepEqual(result.violations, []);
+  });
+
   it('does not count binary file churn against the numeric threshold', () => {
     const dir = makeRepo();
     writeFileSync(join(dir, 'base.txt'), 'x\n');
