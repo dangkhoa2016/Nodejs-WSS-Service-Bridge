@@ -343,3 +343,4 @@ Trước khi chia sẻ URL:
 - [ ] chính sách authentication/access của HTTP app là có chủ đích.
 - [ ] nếu cần WebSocket/Upgrade thì đã test riêng.
 
+Bằng chứng live HTTP tunneling qua các môi trường độc lập có trong [báo cáo live acceptance đa nền tảng](live-cross-platform-acceptance-2026-08-24.vi.md).

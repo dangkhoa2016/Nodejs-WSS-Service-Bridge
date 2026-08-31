@@ -429,5 +429,5 @@ After the three beginner guides, these documents contain deeper operational deta
 - [TCP tunnel deployment and operations](tcp-tunnel.md)
 - [External applications to TCP services](guide-external-app-to-tcp-services.md)
 - [Final live / resilience qualification report](final-live-qualification-2026-08-22.md)
+- [Cross-platform live acceptance report](live-cross-platform-acceptance-2026-08-24.md)
 - [Testing guide](../TESTING.md)
-

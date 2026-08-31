@@ -463,3 +463,4 @@ Tunnel đã đi đủ xa để tới service. Hãy sửa Redis ACL/PostgreSQL cr
 - [ ] database authentication vẫn bật;
 - [ ] direct-mode firewall/IP allowlist đủ chặt.
 
+Bằng chứng live Redis và PostgreSQL tunneling qua các môi trường độc lập có trong [báo cáo live acceptance đa nền tảng](live-cross-platform-acceptance-2026-08-24.vi.md).

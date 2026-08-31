@@ -1,482 +1,595 @@
-# Nodejs WSS Service Bridge (Đường hầm đảo ngược HTTP qua WebSocket)
+# Nodejs WSS Service Bridge (HTTP-over-WebSocket Reverse Tunnel)
 
 [![CI](https://github.com/dangkhoa2016/Nodejs-WSS-Service-Bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/dangkhoa2016/Nodejs-WSS-Service-Bridge/actions/workflows/ci.yml)
+[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D20-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![Yarn](https://img.shields.io/badge/Yarn-4.17.1-2C8EBB?logo=yarn&logoColor=white)](https://yarnpkg.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Transport](https://img.shields.io/badge/Transport-HTTP%20%7C%20TCP%20%7C%20SSH-4C8BF5)](docs/START-HERE.vi.md)
+[![Tunnel](https://img.shields.io/badge/Tunnel-WebSocket%20%2F%20WSS-6A5ACD)](docs/START-HERE.vi.md)
 
 > 🌐 Language / Ngôn ngữ: [English](README.md) | **Tiếng Việt**
 
-Đường hầm đảo ngược HTTP qua WebSocket với hỗ trợ tunnel TCP (chế độ trực tiếp + TCP agent), xây dựng trên giao thức ghép kênh (multiplexing) nhị phân. Phơi bày các ứng dụng web UI cục bộ (Stable Diffusion WebUI, Ollama, ComfyUI, v.v.) đang chạy trong môi trường hạn chế kết nối (Google Colab, Kaggle, PC cục bộ) ra Internet thông qua một máy chủ trung gian.
+Một reverse tunnel tự host cho **ứng dụng HTTP** và **dịch vụ TCP generic** chạy qua WebSocket.
+
+Dự án phù hợp với những môi trường có thể kết nối outbound ra Internet nhưng khó hoặc không thể nhận inbound connection trực tiếp, ví dụ Kaggle, Google Colab, máy private, development container và máy nằm sau NAT/firewall hạn chế.
+
+Cùng một dự án xử lý ba use case phổ biến:
+
+1. **Chia sẻ ứng dụng HTTP** — Rails, Node.js, FastAPI, Gradio, REST API, web UI.
+2. **Chia sẻ dịch vụ TCP** — Redis, PostgreSQL, MySQL, Qdrant gRPC và TCP endpoint khác.
+3. **SSH / SCP / SFTP** — remote shell và truyền file qua generic TCP tunnel.
+
+> Mới dùng dự án? **Bắt đầu tại đây:** [Hướng dẫn self-host cho người mới](docs/START-HERE.vi.md)
 
 ---
 
-## Kiến trúc hệ thống
+## Vì sao có dự án này
 
-```
-                                       +------------------------------------------+
-                                       |   Tunnel Client (Colab/Kaggle)           |
-                                       |         (dist/client.js)                 |
-                                       +--------------------+---------------------+
-                                                            | WebSocket (Binary Frames)
-                                                            | Yêu cầu Basic Auth
-                                                            v
-+------------------+   HTTP Request   +---------------------+---------------------+   HTTP Request   +-------------------+
-|  End User Browser| ---------------> |      Intermediary Server (Node.js)       | ---------------> | Local Target App  |
-|  (Public Web)    | <--------------- |  TunnelServer / HttpRouter / TcpRouter   | <--------------- | (e.g. 127.0.0.1:8000)|
-+------------------+   HTTP Response  +---------------------+-----+---------------+   HTTP Response  +-------------------+
-                                                             ^     ^
-                                              TCP direct mode|     |TCP agent mode
-                            +--------------------------------+     +-------------------------------+
-                            | External TCP Client            |     | App on the app host           |
-                            | (Rails / redis-cli)            |     | redis-cli -> 127.0.0.1:6379   |
-                            | -> server:<TCP_TUNNEL_PORT>    |     +-------------------------------+
-                            +--------------------------------+                    | TCP (loopback)
-                                                                                  v
-                                                                   +-------------------------------+
-                                                                   | TCP Agent (app host)          |
-                                                                   |  (dist/tcp-agent.js)          |
-                                                                   |  local listener :AGENT_PORTS  |
-                                                                   +---------------+---------------+
-                                                                                   | WSS /tcp
-                                                                                   v
-                                                                              (server relays)
-                                                                                   | WSS /tunnel
-                                                                                   v
-                                                                   +-------------------------------+
-                                                                   | Tunnel Client on Computer A   |
-                                                                   |  (dist/client.js)             |
-                                                                   +---------------+---------------+
-                                                                                   | TCP (loopback)
-                                                                                   v
-                                                                   +-------------------------------+
-                                                                   | Local service on Computer A   |
-                                                                   | (Redis/Postgres/MySQL/etc.)   |
-                                                                   +-------------------------------+
-```
+Target machine không cần inbound public port.
 
-### Tính năng chính
-1. **Giao thức nhị phân siêu nhẹ**: Header 6 byte `[Version(1B) | Type(1B) | StreamID(4B)]` tối ưu băng thông và mức sử dụng CPU.
-2. **Backpressure & Điều khiển luồng**: Hỗ trợ các frame điều khiển `PAUSE`/`RESUME` kết hợp với `bufferedAmount` để ngăn rò rỉ bộ nhớ.
-3. **Hỗ trợ Tunnel TCP**: Tunnel TCP thô (Redis, Postgres, MySQL, v.v.) song song với HTTP, có backpressure hai chiều, trong hai chế độ:
-   - **Trực tiếp (Direct)**: máy chủ lắng nghe trên `TCP_TUNNEL_PORTS` và chuyển tiếp mỗi kết nối đến một dịch vụ TCP trên máy tunnel client (hỗ trợ danh sách trắng IPv4/CIDR).
-   - **TCP agent**: một `tcp-agent.js` độc lập trên máy chủ ứng dụng phơi bày các port cục bộ qua endpoint WebSocket `/tcp` của máy chủ, nên không cần mở port vào máy chủ (thân thiện với PaaS).
-4. **Bảo mật**:
-   - Xác thực WebSocket qua HTTP Basic Auth (bắt buộc, so sánh thời gian hằng số).
-   - Endpoint cấu hình quản trị được bảo vệ bằng URL ký HMAC-SHA256 có giới hạn thời gian.
-   - Kết nối TCP được lọc bởi danh sách trắng IPv4 (hỗ trợ CIDR).
-5. **Cài đặt Client một dòng**: Tải bundle độc lập và cấu hình qua `setup.sh`.
-6. **Nâng cấp giao dịch (Transactional)**: Trình cài đặt tải về thư mục staging, kiểm tra bundle (`node --check`), rồi hoán đổi file một cách nguyên tử. Client cũ được giữ nguyên nếu staging thất bại.
-7. **Cài đặt không cần TTY**: Mọi lời nhắc đều nhận biến môi trường (`TUNNEL_SERVER_URL`, `TUNNEL_USERNAME`, `TUNNEL_PASSWORD`, `TARGET_ORIGIN`), cho phép triển khai tự động hoàn toàn không có giao diện.
-8. **Bundle độc lập**: Tunnel client và TCP agent được dựng sẵn (esbuild) thành `dist/client.js` và `dist/tcp-agent.js` -- không cần cây mã nguồn máy chủ để chạy tunnel client hay agent.
-9. **Tắt máy nhẹ nhàng (Graceful Shutdown)**: Khi nhận SIGTERM/SIGINT, máy chủ thoát các stream đang hoạt động, đóng bộ lắng nghe TCP, và thoát sạch mà không cần cờ `--test-force-exit`.
-10. **Kiểm tra sức khỏe**: Các endpoint `/__health` và `/healthz` luôn trả về `200 ok`.
-
----
-
-## Cấu trúc thư mục
+Thay vào đó, target chủ động mở authenticated outbound WebSocket connection tới relay do bạn kiểm soát:
 
 ```text
-.
-├── biome.json              # Cấu hình lint và format (Biome)
-├── .env.example            # File MỤC LỤC biến môi trường (trỏ tới 2 template)
-├── .env.example.vps        # Template env đầy đủ: VPS / máy chủ riêng (TCP trực tiếp)
-├── .env.example.single-port # Template env đầy đủ: Render/Railway/Fly.io/Codespaces (chế độ agent)
-├── dist/
-│   ├── client.js           # Bundle esbuild độc lập cho tunnel clients (~49KB, không có deps máy chủ)
-│   └── tcp-agent.js        # Bundle esbuild độc lập cho TCP agents (~29KB, không có deps máy chủ)
-├── docs/
-│   ├── tcp-tunnel.md                             # Hướng dẫn chi tiết TCP tunnel & TCP agent (EN)
-│   ├── tcp-tunnel.vi.md                          # Hướng dẫn chi tiết TCP tunnel & TCP agent (VI)
-│   ├── guide-external-app-to-tcp-services.md     # Hướng dẫn kết nối ứng dụng ngoài với TCP services (Redis) (EN)
-│   └── guide-external-app-to-tcp-services.vi.md  # Hướng dẫn kết nối ứng dụng ngoài với TCP services (Redis) (VI)
-├── scripts/
-│   ├── setup-service-host.sh                     # Cài client bên cạnh Redis/PostgreSQL
-│   ├── setup-application-host.sh                 # Cài một agent trên mỗi máy chủ ứng dụng
-│   ├── audit-commits.js                          # Kiểm tra commit-message do CI gọi
-│   └── audit-push.sh                             # Kiểm tra commit lúc push do CI gọi
-├── serve/
-│   ├── build.js            # Script bundler esbuild (dựng client.js + tcp-agent.js)
-│   ├── client.js           # Mã nguồn tunnel client (import các module dùng chung)
-│   ├── tcp-agent.js        # Mã nguồn TCP agent (listener cục bộ, chuyển tiếp qua WS /tcp)
-│   ├── setup.sh            # Script cài đặt & khởi chạy client một dòng
-│   ├── client-package.json # package.json tối thiểu cho cài đặt chỉ-client
-│   └── tcp-agent-package.json # package.json tối thiểu cho cài đặt chỉ-agent
-├── src/
-│   ├── index.js             # Server entry point
-│   ├── server/              # Core HTTP tunnel server
-│   │   ├── TunnelServer.js  # HTTP Server & WebSocketServer (ws) init, graceful shutdown
-│   │   ├── ClientManager.js # WebSocket clients, heartbeat & lifecycle
-│   │   ├── HttpRouter.js    # HTTP routing, static files, health checks, WebSocket upgrade
-│   │   ├── StreamManager.js # HTTP + TCP stream multiplexing lifecycle
-│   │   └── WsFrameWriter.js # Writable stream for WebSocket binary data
-│   ├── tcp/                 # TCP tunnel subsystem
-│   │   ├── TcpRouter.js     # TCP tunnel listeners (direct mode), IP allowlist, backpressure
-│   │   ├── TcpAgentServer.js # TCP agent WebSocket endpoint (/tcp), port & stream limits
-│   │   ├── VirtualSocket.js # Server-side virtual socket bridging agent and tunnel client
-│   │   ├── TcpFlowControl.js # Pause/resume sync for TCP socket backpressure
-│   │   └── TcpClientHandler.js # Client-side TCP frame handlers
-│   └── shared/              # Shared infrastructure
-│       ├── config.js        # Environment variable loading & validation
-│       ├── protocol.js      # FrameCodec & binary protocol constants (shared)
-│       ├── utils.js         # HMAC, SafeEqual, Sanitize Headers
-│       ├── ipAllowlist.js   # IPv4/CIDR matcher
-│       ├── logging.js       # Logging core implementation
-│       ├── logger.js        # Logging facade (text / JSON, verbose)
-│       └── runtime-config.js # readInteger/readBoolean for standalone agents
-├── public/                 # Tài nguyên trang đích (landing page)
-├── test/                    # Test suite (built-in node:test runner)
-│   ├── server/              # Core server tests
-│   │   ├── artifact-routes.test.js
-│   │   ├── config-endpoint.test.js
-│   │   ├── shutdown.test.js
-│   │   ├── stream-manager.test.js
-│   │   ├── stream-manager-tcp.test.js
-│   │   ├── tls-trust.test.js
-│   │   └── websocket-auth.test.js
-│   ├── tcp/                 # TCP tunnel tests
-│   │   ├── protocol-negative.test.js
-│   │   ├── tcp-agent-e2e.test.js
-│   │   ├── tcp-agent-process.test.js
-│   │   ├── tcp-agent-server.test.js
-│   │   ├── tcp-agent-soak.test.js
-│   │   ├── tcp-cleanup.test.js
-│   │   ├── tcp-client-handler.test.js
-│   │   ├── tcp-e2e.test.js
-│   │   ├── tcp-entry-e2e.test.js
-│   │   ├── tcp-flow-control.test.js
-│   │   ├── tcp-open-ack.test.js
-│   │   ├── tcp-real-integration.test.js
-│   │   ├── tcp-router.test.js
-│   │   ├── tcp-stress.test.js
-│   │   └── virtual-socket.test.js
-│   ├── shared/              # Shared module tests
-│   │   ├── audit-push.test.js
-│   │   ├── commit-audit.test.js
-│   │   ├── config-validation.test.js
-│   │   ├── ip-allowlist.test.js
-│   │   ├── logger.test.js
-│   │   └── utils.test.js
-│   ├── client/              # Client bundle tests
-│   │   ├── client-build.test.js
-│   │   └── client-reconnect.test.js
-│   ├── installer/           # Installer tests
-│   │   ├── installer.test.js
-│   │   └── installer-e2e.test.js
-│   ├── scripts/             # Kiểm thử script setup đa máy chủ
-│   │   ├── multi-host-setup.test.js
-│   │   └── multi-host-installer.test.js
-│   ├── helpers/
-│   │   └── tcp-test-setup.js
-│   └── fixtures/
-│       ├── client-captures-env.js
-│       ├── client-exits.js
-│       ├── client-never-ready.js
-│       ├── client-writes-ready.js
-│       ├── role-ready.js
-│       ├── role-exits.js
-│       ├── role-never-ready.js
-│       └── role-auth-failed.js
-├── LICENSE
-├── package.json
-├── TESTING.md              # Hướng dẫn kiểm thử chi tiết (EN)
-├── TESTING.vi.md           # Hướng dẫn kiểm thử chi tiết (VI)
-├── yarn.lock
-├── .github/workflows/ci.yml # CI: lint, tests (Node 20/22/24 + Redis/Postgres), audit, Docker, installer
-├── .github/workflows/soak.yml # Workflow soak TCP agent định kỳ
-└── Dockerfile
+Private target
+(Rails / Redis / sshd)
+       |
+       | outbound WSS /tunnel
+       v
++---------------------------+
+| Nodejs-WSS-Service-Bridge relay   |
+| public HTTPS/WSS endpoint |
++---------------------------+
+       ^
+       |
+       | HTTP hoặc WSS /tcp
+       |
+Browser / app / local tcp-agent
 ```
 
-### Tài liệu chi tiết
+Phù hợp cho:
 
-Để tham khảo chi tiết hơn, xem các tài liệu trong `docs/`:
-- [Hướng dẫn TCP Tunnel & TCP Agent (Tiếng Anh)](docs/tcp-tunnel.md)
-- [Hướng dẫn TCP Tunnel & TCP Agent (Tiếng Việt)](docs/tcp-tunnel.vi.md)
-- [Kết nối ứng dụng bên ngoài với TCP services (Redis) (Tiếng Anh)](docs/guide-external-app-to-tcp-services.md)
-- [Kết nối ứng dụng bên ngoài với TCP services (Redis) (Tiếng Việt)](docs/guide-external-app-to-tcp-services.vi.md)
-- [Báo cáo Qualification Live / Resilience Cuối cùng (2026-08-22)](docs/final-live-qualification-2026-08-22.vi.md)
+- demo chạy trên Kaggle hoặc Colab;
+- máy private/home nằm sau NAT;
+- PaaS chỉ expose một public HTTP port;
+- truy cập development service tự host;
+- cho application host dùng Redis/PostgreSQL private;
+- SSH tới target mà không mở SSH trực tiếp ra Internet.
 
 ---
 
-## Hướng dẫn cài đặt máy chủ
+## Ba use case
 
-### Yêu cầu
-- **Node.js**: >= 20.0.0
-- **Trình quản lý gói**: Yarn (khuyến nghị) hoặc npm
+### 1. Ứng dụng HTTP
 
-### Bắt đầu nhanh
+Ví dụ:
 
-```bash
-# Clone và cài đặt
-git clone <repo> && cd Nodejs-WSS-Service-Bridge
-corepack enable && yarn install
-
-# Cấu hình -- chép MỘT trong hai template theo chế độ (xem bên dưới)
-cp .env.example.vps .env            # VPS / máy chủ riêng (chế độ TCP trực tiếp)
-# cp .env.example.single-port .env  # Render/Railway/Fly.io/Codespaces (chế độ agent)
-# Sửa .env theo cài đặt của bạn (bắt buộc TUNNEL_USERNAME và TUNNEL_PASSWORD)
-
-# Khởi chạy
-yarn prod
+```text
+Internet
+   |
+https://tunnel.example.com
+   |
+Nodejs-WSS-Service-Bridge
+   |
+WSS /tunnel
+   |
+private machine
+   |
+http://127.0.0.1:3000
+   |
+Rails
 ```
 
-> `yarn dev` dựng các bundle trước tiên (`node serve/build.js && ...`), nên các bundle phân phối cho tunnel clients và TCP agents luôn được cập nhật khi phát triển. `yarn prod` **không** tự dựng -- hãy chạy `yarn build:client` một lần trước khi khởi động (`Dockerfile` dựng tại lúc dựng ảnh).
+Guide:
 
-### Dựng Client Bundle
+**[Use Case 1 — Chia sẻ ứng dụng HTTP](docs/use-case-http.vi.md)**
 
-> **Quan trọng:** `dist/` **không được commit vào git** (xem `.gitignore`) -- một bản clone mới sẽ không có thư mục `dist/`. Máy chủ phân phối các bundle này cho tunnel clients và TCP agents tại `/${INSTALL_UUID}-client.js` và `/${INSTALL_UUID}-tcp-agent.js`. Nếu `dist/` **thiếu**, các URL đó trả về `500 Internal Server Error` và quá trình cài đặt client/agent thất bại; nếu `dist/` **cũ**, client sẽ tải mã lỗi thời có thể không tương thích với máy chủ hiện tại.
+Target điển hình:
+
+- Rails;
+- Node.js / Express;
+- FastAPI;
+- Gradio;
+- web dashboard;
+- REST API.
+
+---
+
+### 2. Redis / PostgreSQL / generic TCP
+
+Có hai mode.
+
+**Direct TCP** — phù hợp VPS nơi bạn kiểm soát TCP port:
+
+```text
+application -> relay:6379 -> WSS /tunnel -> target -> Redis:6379
+```
+
+**TCP-agent mode** — phù hợp PaaS chỉ có một public port:
+
+```text
+application
+   -> 127.0.0.1:6379
+   -> tcp-agent
+   -> WSS /tcp
+   -> relay
+   -> WSS /tunnel
+   -> target
+   -> Redis:6379
+```
+
+Guide:
+
+**[Use Case 2 — Chia sẻ Redis, PostgreSQL và dịch vụ TCP](docs/use-case-tcp.vi.md)**
+
+---
+
+### 3. SSH / SCP / SFTP
+
+SSH được truyền bằng generic TCP tunnel.
+
+```text
+ssh -p 22001 user@127.0.0.1
+       |
+       v
+local tcp-agent
+       |
+    WSS /tcp
+       |
+       v
+relay
+       |
+  WSS /tunnel
+       |
+       v
+kaggle-1 -> 127.0.0.1:2222 sshd
+```
+
+Multi-target topology hỗ trợ route như:
+
+```text
+22001 -> kaggle-1:2222
+22002 -> kaggle-2:2222
+```
+
+Guide:
+
+**[Use Case 3 — SSH, SCP và SFTP](docs/use-case-ssh.vi.md)**
+
+### Script SSH tái sử dụng
+
+Repository có ba helper portable trong `scripts/`:
+
+| Script | Môi trường | Mục đích |
+|---|---|---|
+| `setup-wss-ssh-target.sh` | Target Kaggle / Colab / Ubuntu-like | Tạo SSH target dùng key-only, tùy chọn passwordless sudo và đăng ký tunnel client có tên |
+| `ssh-via-nodejs-wss-service-bridge.sh` | Linux / GitHub Codespaces | Mở local TCP-agent route rồi SSH tới target có tên |
+| `ssh-via-nodejs-wss-service-bridge.bat` | Windows | Mở TCP-agent route tương đương bằng Windows OpenSSH |
+
+Các helper không hard-code private relay domain, install UUID, relay credential hoặc đường dẫn SSH key riêng của một máy. Hãy cấu hình các giá trị đó bằng environment variable. Ví dụ dùng đường dẫn chuẩn như `$HOME/.ssh/id_ed25519` và `%USERPROFILE%\.ssh\id_ed25519`.
+
+Ví dụ Linux / Codespaces:
 
 ```bash
+export RELAY_HOST='tunnel.example.com'
+export INSTALL_UUID='<stable-install-uuid>'
+export AGENT_USERNAME='<relay-user>'
+
+./scripts/ssh-via-nodejs-wss-service-bridge.sh \
+  "$HOME/.ssh/id_ed25519" \
+  colab-1
+```
+
+Ví dụ Windows:
+
+```bat
+set "RELAY_HOST=tunnel.example.com"
+set "INSTALL_UUID=<stable-install-uuid>"
+set "AGENT_USERNAME=<relay-user>"
+
+scripts\ssh-via-nodejs-wss-service-bridge.bat "%USERPROFILE%\.ssh\id_ed25519" "colab-1"
+```
+
+Ví dụ bootstrap target:
+
+```bash
+export TUNNEL_SERVER_URL='https://tunnel.example.com'
+export TUNNEL_USERNAME='<relay-user>'
+export INSTALL_UUID='<stable-install-uuid>'
+export TUNNEL_PASSWORD='<relay-password>'
+export SSH_PUBLIC_KEY_FILE="$HOME/.ssh/id_ed25519.pub"
+
+sudo -E ./scripts/setup-wss-ssh-target.sh colab-1
+```
+
+Live acceptance cho SSH helper:
+
+| Môi trường local | Target Kaggle | Target Colab | Duy trì `tmux` |
+|---|---|---|---|
+| Windows 10 | PASS | PASS | PASS trên Colab |
+| GitHub Codespaces / Linux | Chưa chạy lại trong closeout này | PASS | PASS trên Colab |
+
+Matrix chỉ ghi PASS cho tổ hợp đã được chạy thật trong live acceptance; ô chưa test không được hiểu là failure.
+
+---
+
+## Thực chất dự án implement gì
+
+Ở transport level, dự án có hai capability chính:
+
+```text
+Nodejs-WSS-Service-Bridge
+│
+├── HTTP reverse tunnel
+│   └── HTTP apps / REST APIs / web UIs
+│
+└── Generic TCP tunnel
+    ├── Redis
+    ├── PostgreSQL
+    ├── MySQL
+    ├── SSH
+    ├── SCP / SFTP
+    └── các TCP protocol khác
+```
+
+SSH là use case TCP, không phải custom protocol riêng trong relay.
+
+---
+
+# Quick start — deploy relay của riêng bạn
+
+## Yêu cầu
+
+- Node.js 20 trở lên;
+- Git;
+- Corepack/Yarn;
+- Linux được khuyến nghị;
+- HTTPS endpoint nếu deploy public Internet.
+
+Clone:
+
+```bash
+git clone https://github.com/dangkhoa2016/Nodejs-WSS-Service-Bridge.git
+cd Nodejs-WSS-Service-Bridge
+
+corepack enable
+yarn install --immutable
 yarn build:client
 ```
 
-Tạo ra `dist/client.js` (tunnel client) và `dist/tcp-agent.js` (TCP agent) -- các bundle esbuild độc lập được phân phối cho tunnel clients và TCP agents. Cả hai đều không cần cây mã nguồn máy chủ.
+Build tạo standalone bundle dùng để phân phối tới target và agent:
 
-`yarn dev` tự động dựng trước tiên (`node serve/build.js && NODE_ENV=development node src/index.js`), nên `dist/` được dựng lại trước khi máy chủ dev khởi động. `yarn prod` **không** tự dựng -- hãy chạy `yarn build:client` thủ công trước khi khởi động (ví dụ sau khi sửa `serve/client.js` hoặc `serve/tcp-agent.js`).
+```text
+dist/client.js
+dist/tcp-agent.js
+```
 
-`Dockerfile` cũng chạy `yarn build:client` tại lúc dựng ảnh, nên các triển khai Docker không bị ảnh hưởng.
+---
 
-### Biến môi trường
+## Chọn server profile
 
-> `.env.example` chỉ là một file **mục lục (index)** -- các template đầy đủ kèm chú thích là `.env.example.vps` (chế độ TCP trực tiếp, máy chủ bind `TCP_TUNNEL_PORTS`) và `.env.example.single-port` (chế độ agent, `TCP_AGENT_ALLOWED_PORTS`). Các cài đặt phổ biến nhất được nêu dưới đây; xem template để biết mọi biến và giá trị mặc định. `.env` chỉ được tự nạp khi `NODE_ENV` không đặt hoặc là `development`.
+### Một public port / PaaS
+
+Dùng:
+
+```bash
+cp .env.example.single-port .env
+```
+
+Khuyến nghị cho:
+
+- Northflank;
+- Render;
+- Railway;
+- platform kiểu Fly.io;
+- host chỉ hỗ trợ HTTP/HTTPS.
+
+HTTP đi trực tiếp qua relay. TCP và SSH dùng TCP agent.
+
+### VPS / dedicated server
+
+Dùng:
+
+```bash
+cp .env.example.vps .env
+```
+
+VPS có thể dùng cả direct TCP và TCP-agent mode.
+
+---
+
+## Cấu hình tối thiểu
+
+Tạo stable UUID một lần:
+
+```bash
+node -e "console.log(require('node:crypto').randomUUID())"
+```
+
+Tạo password mạnh:
+
+```bash
+node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
+```
+
+Ít nhất set:
 
 ```env
-NODE_ENV=development
 PORT=7860
-TUNNEL_PATH=/tunnel
-SERVER_HOST=https://your-server-host
-INSTALL_UUID=
+SERVER_HOST=https://tunnel.example.com
 
-# Bắt buộc -- WebSocket clients phải xác thực
-TUNNEL_USERNAME=your_username
-TUNNEL_PASSWORD=your_password
+INSTALL_UUID=<stable-uuid>
 
-# Giới hạn stream HTTP
-MAX_CONCURRENT_STREAMS=200
+TUNNEL_USERNAME=<user-cua-ban>
+TUNNEL_PASSWORD=<secret-ngau-nhien-dai>
+
 MAX_TUNNEL_CLIENTS=1
-STREAM_IDLE_TIMEOUT_MS=120000
-HTTP_REQUEST_TIMEOUT_MS=0
-
-# Giới hạn WebSocket / frame
-WS_HIGH_WATER_BYTES=1048576
-WS_LOW_WATER=524288
-MAX_FRAME_PAYLOAD_BYTES=262144
-WS_MAX_PAYLOAD_BYTES=2097152
-
-# Đệm (Buffering)
-MAX_DEST_BUFFER_BYTES=8388608
-DRAIN_TIMEOUT_MS=30000
-
-# TCP tunnel (tùy chọn, chế độ trực tiếp)
-TCP_TUNNEL_HOST=127.0.0.1
-TCP_TUNNEL_PORTS=6379,5432
-TCP_TUNNEL_BIND_HOST=127.0.0.1
-TCP_TUNNEL_ALLOWED_IPS=127.0.0.1
-TCP_CLIENT_ALLOWED_HOSTS=127.0.0.1
-TCP_CONNECT_TIMEOUT_MS=10000
-TCP_MAX_CONNECTIONS_PER_PORT=20
-TCP_SHUTDOWN_DRAIN_TIMEOUT_MS=5000
-
-# TCP agent qua WebSocket (tùy chọn, chế độ agent)
-TCP_AGENT_PATH=/tcp
-TCP_AGENT_ALLOWED_PORTS=6379
-TCP_AGENT_USERNAME=agent
-TCP_AGENT_PASSWORD=agent_secret
-TCP_AGENT_ALLOWED_ORIGINS=
-TCP_AGENT_REQUIRE_TLS=false
-TCP_AGENT_TRUSTED_PROXIES=
-TCP_AGENT_MAX_STREAMS_PER_AGENT=100
-
-# Admin config API
-ADMIN_SECRET=your_admin_secret_key
-LOG_FORMAT=text
-VERBOSE=false
 ```
 
-`INSTALL_UUID` là tùy chọn -- một UUID ngẫu nhiên sẽ được tạo khi khởi động nếu không được đặt.
-
-### Docker
-
-```bash
-# Dựng và chạy
-docker build -t tunnel-server .
-docker run -d --restart=unless-stopped -p 7860:7860 \
-  -e TUNNEL_USERNAME=admin \
-  -e TUNNEL_PASSWORD=secret \
-  tunnel-server
-```
-
----
-
-## Hướng dẫn kết nối Client (`client.js`)
-
-Client (ví dụ: trên Google Colab hoặc máy cục bộ) kết nối đến Server qua script `setup.sh`:
-
-> Mặc định máy chủ chỉ chấp nhận **một** tunnel client tại một thời điểm; đặt `MAX_TUNNEL_CLIENTS` để cho phép nhiều hơn. Khi cần định tuyến TCP nhiều target một cách xác định, hãy đặt `TUNNEL_ID` duy nhất cho từng client, ví dụ `kaggle-1`, `kaggle-2`, hoặc `colab-1`. ID đang hoạt động bị trùng sẽ bị từ chối; nếu có nhiều tunnel client mà TCP agent không chỉ rõ target thì yêu cầu cũng bị từ chối.
-
-**Yêu cầu trên máy client:** `curl`, `node` (>= 20), `npm`, `mv` hỗ trợ GNU `-T`
-
-Các script cài đặt nhiều máy (`setup-service-host.sh`, `setup-application-host.sh`) hướng tới **Linux với GNU coreutils/findutils** (`find -printf`, `sort -z`, `cut -z`). Trên macOS, hãy cài GNU tools (`brew install coreutils findutils`, rồi `alias mv=gmv`; `gfind`/`gsort`/`gcut` phải đứng trước các bản BSD trên `PATH`) hoặc cài đặt thủ công.  Rollback đầy đủ (khôi phục cấu hình runtime từ process trước đó) yêu cầu Linux `/proc/$pid/environ`; trên nền tảng không phải Linux, đặt `ALLOW_CODE_ONLY_ROLLBACK=1` để rollback bằng code trước đó với cấu hình runtime hiện tại của installer (không khôi phục environment của process trước đó).
-
-> Trên macOS: cài coreutils (`brew install coreutils`) để có `gmv -T`, sau đó `alias mv=gmv`.
-
-### 1. Cài đặt tự động bằng lệnh một dòng
-```bash
-curl -fsSL https://<your-server-host>/<uuid>-install | bash
-```
-
-### 2. Cài đặt với biến môi trường được đặt sẵn
-```bash
-TUNNEL_SERVER_URL=wss://your-server-host/tunnel \
-TUNNEL_USERNAME=admin \
-TUNNEL_PASSWORD=secret \
-TUNNEL_ID=kaggle-1 \
-TARGET_ORIGIN=http://127.0.0.1:8000 \
-curl -fsSL https://your-server-host/<uuid>-install | bash
-```
-
-Các artifact được tải về một thư mục phát hành (release) bất biến duy nhất và được xác thực trước khi client đang chạy bị dừng. Việc xác thực thất bại sẽ xóa bản phát hành mới và giữ nguyên client hiện tại. Sau khi kích hoạt, trình cài đặt chờ file sẵn sàng của client trước khi coi việc chuyển sang bản mới là hoàn tất. Nếu một bản phát hành đã xác thực không vượt qua kiểm tra sẵn sàng (readiness), nó sẽ bị dừng và bản phát hành trước đó được kích hoạt lại cùng cấu hình thời gian chạy cũ (thông tin đăng nhập, cổng và cài đặt dịch vụ được lưu trong bộ nhớ từ tiến trình đang chạy trước khi dừng), rồi được xác minh lại; nhờ vậy việc đổi sai mật khẩu hoặc cổng không làm hỏng việc rollback. Nếu không lấy được cấu hình thời gian chạy cũ (ví dụ tiến trình cũ không còn chạy hoặc không đọc được environment), trình cài đặt từ chối dừng tiến trình đang chạy trừ khi đặt `ALLOW_CODE_ONLY_ROLLBACK=1`, lúc đó nó rollback bằng code trước đó với cấu hình runtime hiện tại của installer (không khôi phục environment của process trước đó). Log của bản thất bại được giữ lại trong `~/.tunnel-client/logs/` để chẩn đoán. Nếu không thể khôi phục bản phát hành trước đó, trình cài đặt thoát với mã lỗi khác 0 và giữ nguyên bản thất bại để kiểm tra.
-
-### 3. Quản lý tiến trình Client
-- **Xem log Client**: `tail -f ~/.tunnel-client/client.log`
-- **Xóa log Client**: `> ~/.tunnel-client/client.log`
-- **Dừng Client**: `kill $(cat ~/.tunnel-client/client.pid)` (trình cài đặt xác minh PID khớp với bundle client trước khi kill; khi dùng tay hãy kiểm tra PID thuộc về `client.js`)
-- **Trạng thái sẵn sàng của Client**: File `client.ready` trong `~/.tunnel-client/` chứa PID của client và chỉ được ghi sau khi client đã mở kết nối WebSocket được xác thực tới endpoint `/tunnel` của máy chủ, và được ghi nguyên tử (temp + rename) nên reader không bao giờ đọc phải nội dung dở dang. File bị xóa khi client ngắt kết nối, xác thực thất bại, hoặc dừng và được ghi lại khi client kết nối lại, nên một file ready cũ không bao giờ báo một tiến trình đã chết hoặc đã ngắt kết nối là khỏe mạnh.
-
-> **Vòng đời notebook/runtime:** official installer tách client khỏi vòng đời installer/notebook cell bằng `setsid` khi có thể, `nohup`, và stdin từ `/dev/null`, đồng thời vẫn giữ PID thật của client dùng cho readiness checks. Cách này bảo vệ khi parent shell/cell kết thúc; nó **không** làm process sống qua full Kaggle runtime, container, host hoặc VM restart. Sau full runtime restart, hãy dựng lại các runtime service cần thiết và chạy lại installer với cùng `TUNNEL_ID`.
-
----
-
-## TCP Tunnel & TCP Agent
-
-Máy chủ hỗ trợ tunnel TCP thô (Redis, Postgres, MySQL, v.v.) song song với HTTP, trong hai chế độ bổ trợ nhau dùng chung các frame nhị phân (`TCP_OPEN`/`TCP_DATA`/`TCP_CLOSE`/`TCP_ABORT` + `PAUSE`/`RESUME`) và backpressure hai chiều.
-
-### Chế độ trực tiếp (máy chủ mở bộ lắng nghe TCP)
-
-Máy chủ lắng nghe trên từng port trong `TCP_TUNNEL_PORTS`. Với mỗi kết nối đến, máy chủ yêu cầu tunnel client đang kết nối quay số **cùng port đó** trên `TCP_TUNNEL_HOST` (thường là `127.0.0.1`), rồi chuyển tiếp dữ liệu theo cả hai hướng.
-
-```
-External TCP Client -- TCP :6379 --> Server :6379 -- WS /tunnel --> client.js -- 127.0.0.1:6379 --> Redis
-```
-
-- Kiểm soát truy cập bằng `TCP_TUNNEL_BIND_HOST` và `TCP_TUNNEL_ALLOWED_IPS` (danh sách trắng IPv4/CIDR).
-- **Không đổi port**: dịch vụ cục bộ phải lắng nghe đúng port mà ứng dụng bên ngoài kết nối tới.
-
-### Chế độ TCP agent (không cần mở port vào máy chủ)
-
-Khi máy chủ chạy trên nền tảng PaaS/hosting chỉ có một port công cộng, hãy chạy **TCP agent** độc lập (`dist/tcp-agent.js`) trên máy chủ ứng dụng. Nó lắng nghe trên `AGENT_PORTS` cục bộ và chuyển tiếp kết nối qua endpoint WebSocket `/tcp` của máy chủ; tunnel client trên máy dịch vụ quay số dịch vụ cục bộ.
-
-```
-Rails -- 127.0.0.1:6379 --> tcp-agent.js -- WS /tcp --> Server -- WS /tunnel --> client.js -- 127.0.0.1:6379 --> Redis
-```
-
-> **Chế độ agent**: ứng dụng bên ngoài kết nối tới port cục bộ của agent trên máy chủ ứng dụng (ví dụ `redis://127.0.0.1:6379`), **không phải** tới máy chủ.
-
-Endpoint `/tcp` chỉ tồn tại khi `TCP_AGENT_ALLOWED_PORTS` không rỗng. Nó được bảo vệ bằng Basic Auth (mặc định dùng thông tin đăng nhập tunnel, có thể ghi đè bằng `TCP_AGENT_USERNAME`/`TCP_AGENT_PASSWORD`) và hỗ trợ tùy chọn danh sách trắng Origin (`TCP_AGENT_ALLOWED_ORIGINS`) cùng kiểm tra TLS (`TCP_AGENT_REQUIRE_TLS`, tin tưởng tiêu đề `X-Forwarded-Proto: https` chỉ từ các proxy liệt kê trong `TCP_AGENT_TRUSTED_PROXIES`). Bundle agent được phân phối tại `/${INSTALL_UUID}-tcp-agent.js` kèm manifest tối thiểu tại `/${INSTALL_UUID}-tcp-agent-package.json`.
-
-Hai chế độ có thể cùng tồn tại trên một máy chủ. Xem [docs/tcp-tunnel.vi.md](docs/tcp-tunnel.vi.md) để có hướng dẫn cấu hình đầy đủ và ví dụ Rails/Redis.
-
-### SSH nhiều target qua một endpoint công khai
-
-Một endpoint WebSocket công khai có thể định tuyến nhiều cổng TCP local đến các tunnel client khác nhau. Mô hình này phù hợp khi một dịch vụ Northflank đứng trước nhiều notebook Kaggle/Colab.
-
-Ví dụ cấu hình server:
+Nếu server một port và dùng Redis/PostgreSQL/SSH:
 
 ```env
-MAX_TUNNEL_CLIENTS=5
-TCP_AGENT_ALLOWED_PORTS=2222
+TCP_TUNNEL_PORTS=
+TCP_AGENT_ALLOWED_PORTS=6379,5432,2222
+```
+
+Với SSH idle lâu:
+
+```env
 STREAM_IDLE_TIMEOUT_MS=0
 ```
 
-Mỗi target dùng cùng URL `/tunnel` nhưng đăng ký ID khác nhau:
+---
 
-```env
-# Kaggle notebook 1
-TUNNEL_SERVER_URL=wss://your-service.code.run/tunnel
-TUNNEL_ID=kaggle-1
+## Khởi động
 
-# Kaggle notebook 2
-TUNNEL_SERVER_URL=wss://your-service.code.run/tunnel
-TUNNEL_ID=kaggle-2
-```
-
-Trên máy local, một TCP agent có thể mở nhiều cổng loopback:
-
-```env
-TUNNEL_SERVER_URL=wss://your-service.code.run/tcp
-AGENT_ROUTES=22001=kaggle-1:2222,22002=kaggle-2:2222,22003=colab-1:2222
-```
-
-Sau đó có thể mở các terminal riêng:
+Development:
 
 ```bash
-ssh -p 22001 user@127.0.0.1
-ssh -p 22002 user@127.0.0.1
-ssh -p 22003 user@127.0.0.1
+yarn dev
 ```
 
-`AGENT_ROUTES` có cú pháp `localPort=targetTunnelId:targetPort` và không dùng đồng thời với `AGENT_PORTS`. Với chế độ agent một target, vẫn dùng `AGENT_PORTS` và có thể đặt thêm `TARGET_TUNNEL_ID`.
-
----
-
-## Cấu hình quản trị & thời gian chạy (`/<uuid>-config`)
-
-Máy chủ cho phép cập nhật cấu hình log theo thời gian thực (`verbose`, `logFormat`) **không cần khởi động lại máy chủ** qua các URL ký HMAC.
-
-- **Endpoint**: `GET` / `POST` `/<uuid>-config?expires=<TIMESTAMP>&sig=<HMAC_HEX>`
-- **POST Body (JSON)**:
-  ```json
-  {
-    "verbose": true,
-    "logFormat": "json"
-  }
-  ```
-
----
-
-## Kiểm tra sức khỏe
-
-Máy chủ phơi bày hai endpoint kiểm tra sức khỏe luôn trả về `200 ok`:
-
-- `GET /__health`
-- `GET /healthz`
-
-Các endpoint này không yêu cầu xác thực. Ảnh Docker bao gồm chỉ thị `HEALTHCHECK` ping `/__health`.
-
-Máy chủ cũng phục vụ một trang đích nhỏ tại `GET /__info` hiển thị các URL cài đặt và cấu hình; trong khi chưa có tunnel client nào kết nối, `GET /` sẽ chuyển hướng về đó.
-
----
-
-## Tắt máy nhẹ nhàng
-
-Máy chủ xử lý `SIGTERM` và `SIGINT` bằng cách:
-
-1. Dừng các bộ lắng nghe TCP và endpoint WebSocket TCP agent (không kết nối mới) và hủy các stream TCP đang hoạt động, cho phép tối đa 5 giây để thoát dữ liệu (drain).
-2. Đóng tất cả WebSocket clients (tunnel + agent) và HTTP server (mỗi WebSocket client bị buộc kết thúc sau 5 giây).
-3. Thoát với mã 0 (hoặc 1 nếu `uncaughtException`).
-
-Các bước trên chạy song song trong thời gian chờ tổng thể 10 giây, sau đó tiến trình thoát với mã 1. Lỗi của từng thành phần trong khi tắt máy được cô lập -- một thành phần lỗi không chặn các thành phần còn lại.
-
----
-
-## Kiểm thử
-
-Bộ kiểm thử sử dụng **test runner tích hợp của Node.js** (`node:test`). Không cần cờ `--test-force-exit` -- bộ kiểm thử thoát sạch sau khi tất cả kiểm thử hoàn thành.
+Production từ shell:
 
 ```bash
-npm test
+set -a
+. ./.env
+set +a
+
+yarn build:client
+yarn prod
 ```
 
-Xem hướng dẫn kiểm thử chi tiết trong [TESTING.vi.md](TESTING.vi.md).
+> Trong production mode, ứng dụng không tự load `.env`; hãy export variables hoặc cấu hình chúng trong hosting platform.
 
-Chạy `yarn test` để xem số kiểm thử hiện tại, hoặc `yarn check` để chạy lint, kiểm thử và dựng client bundle cùng lúc. Các kiểm thử dịch vụ thực cục bộ có thể bỏ qua khi không có Redis/Postgres; CI đặt `REQUIRE_TCP_SERVICES=1`. Phạm vi TCP gồm kiểm thử đơn vị cho agent server và virtual socket, kiểm thử cấp tiến trình cho agent, kiểm thử end-to-end cho agent, cùng kiểm thử protocol-negative (`yarn test:protocol-negative`) và soak có giới hạn (`yarn test:soak`).
+Docker:
+
+```bash
+docker build -t nodejs-wss-service-bridge .
+
+docker run --rm   --env-file .env   -p 7860:7860   nodejs-wss-service-bridge
+```
 
 ---
 
-## CI
+## Xác minh relay
 
-CI chạy trên các push vào `main` và pull request nhắm tới `main`: lint cùng xác minh bundle độc lập, kiểm thử trên Node.js 20, 22, và 24 với dịch vụ Redis và Postgres sẵn sàng cho kiểm thử tích hợp, kiểm tra audit dependency/commit (`yarn npm audit --all` + kiểm tra commit-message), job Docker (dựng, health check, artifact routes, installer upgrade/rollback), và job installer. Workflow soak định kỳ (`.github/workflows/soak.yml`) chạy kiểm thử soak TCP agent có giới hạn hàng tuần và theo yêu cầu.
+```bash
+curl -fsS https://tunnel.example.com/__health
+```
+
+Mong đợi:
+
+```text
+ok
+```
+
+Trang thông tin:
+
+```text
+https://tunnel.example.com/__info
+```
+
+Route quan trọng:
+
+| Route | Mục đích |
+|---|---|
+| `/tunnel` | target client WebSocket |
+| `/tcp` | TCP-agent WebSocket |
+| `/__health` | health check |
+| `/__info` | thông tin deployment |
+| `/<INSTALL_UUID>-install` | target-client installer |
+| `/<INSTALL_UUID>-client.js` | target-client bundle |
+| `/<INSTALL_UUID>-tcp-agent.js` | TCP-agent bundle |
 
 ---
 
-## Giấy phép
+# Cài target client
 
-Được cấp phép theo [MIT License](LICENSE).
+Relay phục vụ installer cho private target.
+
+Ví dụ HTTP:
+
+```bash
+export TUNNEL_SERVER_URL='https://tunnel.example.com'
+export TUNNEL_USERNAME='<user-cua-ban>'
+export TUNNEL_PASSWORD='<secret-cua-ban>'
+export TARGET_ORIGIN='http://127.0.0.1:3000'
+
+curl -fsSL   'https://tunnel.example.com/<INSTALL_UUID>-install'   | bash
+```
+
+State nằm tại:
+
+```text
+~/.tunnel-client/
+```
+
+Healthy:
+
+```text
+client.pid == client.ready == live client PID
+```
+
+Kiểm tra:
+
+```bash
+cat ~/.tunnel-client/client.pid
+cat ~/.tunnel-client/client.ready
+ps -fp "$(cat ~/.tunnel-client/client.pid)"
+tail -n 100 ~/.tunnel-client/client.log
+```
+
+Installer dùng transactional release/readiness model và detach target client khỏi installer/notebook-cell lifecycle bằng `setsid` khi có thể, `nohup`, và stdin từ `/dev/null`.
+
+Full runtime/container/host restart là failure domain khác và cần start process lại.
+
+---
+
+# Multi-target TCP routing
+
+Mỗi target có thể đăng ký `TUNNEL_ID` riêng:
+
+```text
+kaggle-1
+kaggle-2
+colab-1
+```
+
+Local TCP agent định nghĩa route rõ ràng:
+
+```env
+AGENT_ROUTES=22001=kaggle-1:2222,22002=kaggle-2:2222
+```
+
+Cú pháp:
+
+```text
+localPort=targetTunnelId:targetPort
+```
+
+Nhờ vậy một public relay vẫn route TCP chính xác tới nhiều target.
+
+---
+
+# Bảo mật
+
+Dự án có:
+
+- HTTP Basic authentication cho tunnel WebSocket client;
+- authentication riêng/fallback cho TCP agent;
+- constant-time credential comparison;
+- IPv4/CIDR allowlist cho direct TCP listener;
+- optional TLS enforcement cho `/tcp`;
+- trusted-proxy controls;
+- TCP-agent mặc định bind loopback;
+- HMAC-signed admin configuration URLs;
+- transactional client/agent installer có readiness và rollback.
+
+Nhưng vẫn phải áp dụng security của service:
+
+- giữ Redis/PostgreSQL authentication;
+- ưu tiên SSH public key;
+- dùng firewall với direct TCP;
+- không commit real secret;
+- không log SSH/database password;
+- dùng HTTPS/WSS khi deploy public.
+
+---
+
+# Giới hạn quan trọng
+
+## HTTP WebSocket Upgrade
+
+Generic HTTP proxy hiện không proxy arbitrary downstream HTTP `Upgrade: websocket`.
+
+HTTP request/response bình thường hoạt động. App phụ thuộc Action Cable, Socket.IO WebSocket transport hoặc custom browser WebSocket endpoint phải test riêng requirement này.
+
+## HTTP với nhiều target client
+
+`TUNNEL_ID` cho deterministic TCP target selection. Generic HTTP proxy chọn một active connected client thay vì route theo `TUNNEL_ID`.
+
+Với HTTP đơn giản, giữ:
+
+```env
+MAX_TUNNEL_CLIENTS=1
+```
+
+## Process detachment khác host restart
+
+Detached client có thể sống khi installer/notebook cell cha kết thúc miễn runtime còn sống.
+
+Nó không thể sống qua full runtime/container/VM/host restart.
+
+---
+
+# Tài liệu
+
+## Beginner / deployment guides
+
+- **[Bắt đầu tại đây — self-hosting guide](docs/START-HERE.vi.md)**
+- **[Use Case 1 — HTTP application](docs/use-case-http.vi.md)**
+- **[Use Case 2 — TCP services](docs/use-case-tcp.vi.md)**
+- **[Use Case 3 — SSH / SCP / SFTP](docs/use-case-ssh.vi.md)**
+
+## Tài liệu nâng cao
+
+- [TCP tunnel deployment and operations](docs/tcp-tunnel.vi.md)
+- [Kết nối ứng dụng ngoài tới TCP services](docs/guide-external-app-to-tcp-services.vi.md)
+- [Testing](TESTING.vi.md)
+- [Final live / resilience qualification report](docs/final-live-qualification-2026-08-22.vi.md)
+- [Cross-platform live acceptance report](docs/live-cross-platform-acceptance-2026-08-24.vi.md)
+
+Bản English nằm cạnh các tài liệu Vietnamese tương ứng.
+
+---
+
+# Trạng thái validation
+
+Final live/resilience qualification đã bao phủ:
+
+- hai target client độc lập;
+- official installer lifecycle;
+- detached-process longevity;
+- multi-target routing;
+- true-idle SSH;
+- target reconnect và isolation;
+- local tcp-agent reconnect;
+- final interactive SSH;
+- SCP;
+- SHA-256 file-integrity verification.
+
+Kết quả:
+
+```text
+FINAL LIVE / RESILIENCE QUALIFICATION = PASS
+```
+
+Xem [qualification report](docs/final-live-qualification-2026-08-22.vi.md) để biết evidence và tested authority.
+
+Một [báo cáo live acceptance đa nền tảng](docs/live-cross-platform-acceptance-2026-08-24.vi.md) sau đó còn ghi nhận HTTP, Redis và PostgreSQL được tunnel qua các môi trường độc lập (Colab, Kaggle, Codespaces) qua cùng một relay.
+
+---
+
+# Development và testing
+
+Chạy full local checks:
+
+```bash
+yarn check
+```
+
+Từng command:
+
+```bash
+yarn lint
+yarn test
+yarn build:client
+```
+
+Xem [TESTING.vi.md](TESTING.vi.md) để biết chi tiết.
+
+---
+
+# License
+
+MIT — xem [LICENSE](LICENSE).

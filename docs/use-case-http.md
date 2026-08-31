@@ -343,3 +343,4 @@ Before sharing the URL publicly:
 - [ ] authentication/access policy for the HTTP application is intentional.
 - [ ] any required WebSocket/Upgrade behavior has been tested separately.
 
+Live HTTP tunneling evidence across independent environments is recorded in the [cross-platform live acceptance report](live-cross-platform-acceptance-2026-08-24.md).

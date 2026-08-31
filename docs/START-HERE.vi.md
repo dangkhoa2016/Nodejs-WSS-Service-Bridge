@@ -431,5 +431,5 @@ Sau ba guide cho người mới, các tài liệu sau chứa chi tiết vận h�
 - [TCP tunnel deployment and operations](tcp-tunnel.vi.md)
 - [External applications to TCP services](guide-external-app-to-tcp-services.vi.md)
 - [Báo cáo qualification live / resilience cuối cùng](final-live-qualification-2026-08-22.vi.md)
+- [Báo cáo live acceptance đa nền tảng](live-cross-platform-acceptance-2026-08-24.vi.md)
 - [Testing guide](../TESTING.vi.md)
-

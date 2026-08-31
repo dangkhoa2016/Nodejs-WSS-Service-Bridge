@@ -1,482 +1,595 @@
 # Nodejs WSS Service Bridge (HTTP-over-WebSocket Reverse Tunnel)
 
 [![CI](https://github.com/dangkhoa2016/Nodejs-WSS-Service-Bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/dangkhoa2016/Nodejs-WSS-Service-Bridge/actions/workflows/ci.yml)
+[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D20-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![Yarn](https://img.shields.io/badge/Yarn-4.17.1-2C8EBB?logo=yarn&logoColor=white)](https://yarnpkg.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Transport](https://img.shields.io/badge/Transport-HTTP%20%7C%20TCP%20%7C%20SSH-4C8BF5)](docs/START-HERE.md)
+[![Tunnel](https://img.shields.io/badge/Tunnel-WebSocket%20%2F%20WSS-6A5ACD)](docs/START-HERE.md)
 
 > 🌐 Language / Ngôn ngữ: **English** | [Tiếng Việt](README.vi.md)
 
-HTTP-over-WebSocket reverse tunnel with TCP tunneling support (direct + TCP agent mode), built on a binary multiplexing protocol. Expose local web UI applications (Stable Diffusion WebUI, Ollama, ComfyUI, etc.) running in connection-restricted environments (Google Colab, Kaggle, local PC) to the Internet through an intermediary server.
+A self-hosted reverse tunnel for **HTTP applications** and **generic TCP services** over WebSocket.
+
+It is designed for environments that can make outbound Internet connections but cannot easily accept inbound connections, such as Kaggle, Google Colab, private machines, development containers, and hosts behind restrictive NAT/firewalls.
+
+The same project covers three common user-facing use cases:
+
+1. **Expose an HTTP application** — Rails, Node.js, FastAPI, Gradio, REST APIs, web UIs.
+2. **Share TCP services** — Redis, PostgreSQL, MySQL, Qdrant gRPC, and other TCP endpoints.
+3. **SSH / SCP / SFTP** — remote shell and file transfer through the generic TCP tunnel.
+
+> New to the project? **Start here:** [Self-hosting guide for beginners](docs/START-HERE.md)
 
 ---
 
-## System Architecture
+## Why this project
 
-```
-                                       +------------------------------------------+
-                                       |   Tunnel Client (Colab/Kaggle)           |
-                                       |         (dist/client.js)                 |
-                                       +--------------------+---------------------+
-                                                            | WebSocket (Binary Frames)
-                                                            | Basic Auth required
-                                                            v
-+------------------+   HTTP Request   +---------------------+---------------------+   HTTP Request   +-------------------+
-|  End User Browser| ---------------> |      Intermediary Server (Node.js)       | ---------------> | Local Target App  |
-|  (Public Web)    | <--------------- |  TunnelServer / HttpRouter / TcpRouter   | <--------------- | (e.g. 127.0.0.1:8000)|
-+------------------+   HTTP Response  +---------------------+-----+---------------+   HTTP Response  +-------------------+
-                                                             ^     ^
-                                              TCP direct mode|     |TCP agent mode
-                            +--------------------------------+     +-------------------------------+
-                            | External TCP Client            |     | App on the app host           |
-                            | (Rails / redis-cli)            |     | redis-cli -> 127.0.0.1:6379   |
-                            | -> server:<TCP_TUNNEL_PORT>    |     +-------------------------------+
-                            +--------------------------------+                    | TCP (loopback)
-                                                                                  v
-                                                                   +-------------------------------+
-                                                                   | TCP Agent (app host)          |
-                                                                   |  (dist/tcp-agent.js)          |
-                                                                   |  local listener :AGENT_PORTS  |
-                                                                   +---------------+---------------+
-                                                                                   | WSS /tcp
-                                                                                   v
-                                                                              (server relays)
-                                                                                   | WSS /tunnel
-                                                                                   v
-                                                                   +-------------------------------+
-                                                                   | Tunnel Client on Computer A   |
-                                                                   |  (dist/client.js)             |
-                                                                   +---------------+---------------+
-                                                                                   | TCP (loopback)
-                                                                                   v
-                                                                   +-------------------------------+
-                                                                   | Local service on Computer A   |
-                                                                   | (Redis/Postgres/MySQL/etc.)   |
-                                                                   +-------------------------------+
-```
+A target machine does not need a public inbound port.
 
-### Key Features
-1. **Ultra-Lightweight Binary Protocol**: 6-byte header `[Version(1B) | Type(1B) | StreamID(4B)]` optimizes bandwidth and CPU usage.
-2. **Backpressure & Flow Control**: Supports `PAUSE`/`RESUME` control frames combined with `bufferedAmount` to prevent memory leaks.
-3. **TCP Tunnel Support**: Raw TCP tunneling (Redis, Postgres, MySQL, etc.) alongside HTTP, with bidirectional backpressure, in two modes:
-   - **Direct**: the server listens on `TCP_TUNNEL_PORTS` and relays each connection to a TCP service on the tunnel client machine (IPv4/CIDR allowlist supported).
-   - **TCP agent**: a standalone `tcp-agent.js` on the app host exposes local ports through the server's `/tcp` WebSocket endpoint, so no inbound port is needed on the server (PaaS-friendly).
-4. **Security**:
-   - WebSocket authentication via HTTP Basic Auth (required, constant-time comparison).
-   - Admin config endpoint protected by time-limited HMAC-SHA256 signed URLs.
-   - TCP connections filtered by IPv4 IP allowlist (CIDR support).
-5. **One-Line Client Installation**: Downloads the standalone bundle and configures via `setup.sh`.
-6. **Transactional Upgrades**: Installer downloads to a staging directory, validates the bundle (`node --check`), then atomically swaps files. The old client is preserved if staging fails.
-7. **TTY-Free Installation**: All prompts accept environment variables (`TUNNEL_SERVER_URL`, `TUNNEL_USERNAME`, `TUNNEL_PASSWORD`, `TARGET_ORIGIN`), enabling fully automated headless deployment.
-8. **Standalone Bundles**: The tunnel client and the TCP agent are pre-built (esbuild) into `dist/client.js` and `dist/tcp-agent.js` -- no server source tree needed to run tunnel clients or agents.
-9. **Graceful Shutdown**: On SIGTERM/SIGINT, the server drains active streams, closes TCP listeners, and exits cleanly with no `--test-force-exit` flag needed.
-10. **Health Checks**: Endpoints `/__health` and `/healthz` always return `200 ok`.
-
----
-
-## Directory Structure
+Instead, the target opens an authenticated outbound WebSocket connection to a relay that you control:
 
 ```text
-.
-├── biome.json              # Lint and format configuration (Biome)
-├── .env.example            # Env variable INDEX (points to the two templates)
-├── .env.example.vps        # Full env template: VPS / dedicated host (direct TCP)
-├── .env.example.single-port # Full env template: Render/Railway/Fly.io/Codespaces (agent mode)
-├── dist/
-│   ├── client.js           # Standalone esbuild bundle for tunnel clients (~49KB, no server deps)
-│   └── tcp-agent.js        # Standalone esbuild bundle for TCP agents (~29KB, no server deps)
-├── docs/
-│   ├── tcp-tunnel.md                             # Detailed TCP tunnel & TCP agent guide (EN)
-│   ├── tcp-tunnel.vi.md                          # Detailed TCP tunnel & TCP agent guide (VI)
-│   ├── guide-external-app-to-tcp-services.md     # Guide: connect an external app (e.g. Redis) to tunneled TCP services (EN)
-│   └── guide-external-app-to-tcp-services.vi.md  # Guide: connect an external app (e.g. Redis) to tunneled TCP services (VI)
-├── scripts/
-│   ├── setup-service-host.sh                     # Install the client beside Redis/PostgreSQL
-│   ├── setup-application-host.sh                 # Install an agent on each consuming application host
-│   ├── audit-commits.js                          # Commit-message audit invoked by CI
-│   └── audit-push.sh                             # Push-time commit audit invoked by CI
-├── serve/
-│   ├── build.js            # esbuild bundler script (builds client.js + tcp-agent.js)
-│   ├── client.js           # Tunnel client source (imports shared modules)
-│   ├── tcp-agent.js        # TCP agent source (local listeners, relays over WS /tcp)
-│   ├── setup.sh            # One-line client installation & launch script
-│   ├── client-package.json # Minimal package.json for client-only install
-│   └── tcp-agent-package.json # Minimal package.json for agent-only install
-├── src/
-│   ├── index.js             # Server entry point
-│   ├── server/              # Core HTTP tunnel server
-│   │   ├── TunnelServer.js  # HTTP Server & WebSocketServer (ws) init, graceful shutdown
-│   │   ├── ClientManager.js # WebSocket clients, heartbeat & lifecycle
-│   │   ├── HttpRouter.js    # HTTP routing, static files, health checks, WebSocket upgrade
-│   │   ├── StreamManager.js # HTTP + TCP stream multiplexing lifecycle
-│   │   └── WsFrameWriter.js # Writable stream for WebSocket binary data
-│   ├── tcp/                 # TCP tunnel subsystem
-│   │   ├── TcpRouter.js     # TCP tunnel listeners (direct mode), IP allowlist, backpressure
-│   │   ├── TcpAgentServer.js # TCP agent WebSocket endpoint (/tcp), port & stream limits
-│   │   ├── VirtualSocket.js # Server-side virtual socket bridging agent and tunnel client
-│   │   ├── TcpFlowControl.js # Pause/resume sync for TCP socket backpressure
-│   │   └── TcpClientHandler.js # Client-side TCP frame handlers
-│   └── shared/              # Shared infrastructure
-│       ├── config.js        # Environment variable loading & validation
-│       ├── protocol.js      # FrameCodec & binary protocol constants (shared)
-│       ├── utils.js         # HMAC, SafeEqual, Sanitize Headers
-│       ├── ipAllowlist.js   # IPv4/CIDR matcher
-│       ├── logging.js       # Logging core implementation
-│       ├── logger.js        # Logging facade (text / JSON, verbose)
-│       └── runtime-config.js # readInteger/readBoolean for standalone agents
-├── public/                 # Landing page assets
-├── test/                    # Test suite (built-in node:test runner)
-│   ├── server/              # Core server tests
-│   │   ├── artifact-routes.test.js
-│   │   ├── config-endpoint.test.js
-│   │   ├── shutdown.test.js
-│   │   ├── stream-manager.test.js
-│   │   ├── stream-manager-tcp.test.js
-│   │   ├── tls-trust.test.js
-│   │   └── websocket-auth.test.js
-│   ├── tcp/                 # TCP tunnel tests
-│   │   ├── protocol-negative.test.js
-│   │   ├── tcp-agent-e2e.test.js
-│   │   ├── tcp-agent-process.test.js
-│   │   ├── tcp-agent-server.test.js
-│   │   ├── tcp-agent-soak.test.js
-│   │   ├── tcp-cleanup.test.js
-│   │   ├── tcp-client-handler.test.js
-│   │   ├── tcp-e2e.test.js
-│   │   ├── tcp-entry-e2e.test.js
-│   │   ├── tcp-flow-control.test.js
-│   │   ├── tcp-open-ack.test.js
-│   │   ├── tcp-real-integration.test.js
-│   │   ├── tcp-router.test.js
-│   │   ├── tcp-stress.test.js
-│   │   └── virtual-socket.test.js
-│   ├── shared/              # Shared module tests
-│   │   ├── audit-push.test.js
-│   │   ├── commit-audit.test.js
-│   │   ├── config-validation.test.js
-│   │   ├── ip-allowlist.test.js
-│   │   ├── logger.test.js
-│   │   └── utils.test.js
-│   ├── client/              # Client bundle tests
-│   │   ├── client-build.test.js
-│   │   └── client-reconnect.test.js
-│   ├── installer/           # Installer tests
-│   │   ├── installer.test.js
-│   │   └── installer-e2e.test.js
-│   ├── scripts/             # Multi-host setup script tests
-│   │   ├── multi-host-setup.test.js
-│   │   └── multi-host-installer.test.js
-│   ├── helpers/
-│   │   └── tcp-test-setup.js
-│   └── fixtures/
-│       ├── client-captures-env.js
-│       ├── client-exits.js
-│       ├── client-never-ready.js
-│       ├── client-writes-ready.js
-│       ├── role-ready.js
-│       ├── role-exits.js
-│       ├── role-never-ready.js
-│       └── role-auth-failed.js
-├── LICENSE
-├── package.json
-├── TESTING.md              # Detailed testing instructions (EN)
-├── TESTING.vi.md           # Detailed testing instructions (VI)
-├── yarn.lock
-├── .github/workflows/ci.yml  # CI: lint, tests (Node 20/22/24 + Redis/Postgres), audit, Docker, installer
-├── .github/workflows/soak.yml # Scheduled TCP agent soak workload
-└── Dockerfile
+Private target
+(Rails / Redis / sshd)
+       |
+       | outbound WSS /tunnel
+       v
++---------------------------+
+| Nodejs-WSS-Service-Bridge relay   |
+| public HTTPS/WSS endpoint |
++---------------------------+
+       ^
+       |
+       | HTTP or WSS /tcp
+       |
+Browser / app / local tcp-agent
 ```
 
-### Detailed Documentation
+This makes the project useful for:
 
-For more detail, see the guides under `docs/`:
-- [TCP Tunnel & TCP Agent Guide (English)](docs/tcp-tunnel.md)
-- [TCP Tunnel & TCP Agent Guide (Vietnamese)](docs/tcp-tunnel.vi.md)
-- [Connecting an External App to TCP Services (Redis) (English)](docs/guide-external-app-to-tcp-services.md)
-- [Connecting an External App to TCP Services (Vietnamese)](docs/guide-external-app-to-tcp-services.vi.md)
-- [Final Live / Resilience Qualification Report (2026-08-22)](docs/final-live-qualification-2026-08-22.md)
+- demos running on Kaggle or Colab;
+- private/home machines behind NAT;
+- PaaS environments that expose only one public HTTP port;
+- self-hosted access to development services;
+- connecting an application host to a private Redis/PostgreSQL service;
+- SSH access without opening SSH directly on the target machine.
 
 ---
 
-## Server Setup Guide
+## Three use cases
 
-### Requirements
-- **Node.js**: >= 20.0.0
-- **Package Manager**: Yarn (recommended) or npm
+### 1. HTTP applications
 
-### Quick Start
+Example:
 
-```bash
-# Clone and install
-git clone <repo> && cd Nodejs-WSS-Service-Bridge
-corepack enable && yarn install
-
-# Configure -- copy ONE of the two mode-specific templates (see below)
-cp .env.example.vps .env            # VPS / dedicated host (direct TCP mode)
-# cp .env.example.single-port .env  # Render/Railway/Fly.io/Codespaces (agent mode)
-# Edit .env with your settings (TUNNEL_USERNAME and TUNNEL_PASSWORD required)
-
-# Start
-yarn prod
+```text
+Internet
+   |
+https://tunnel.example.com
+   |
+Nodejs-WSS-Service-Bridge
+   |
+WSS /tunnel
+   |
+private machine
+   |
+http://127.0.0.1:3000
+   |
+Rails
 ```
 
-> `yarn dev` builds the bundles first (`node serve/build.js && ...`), so the bundles served to tunnel clients and TCP agents stay up to date while developing. `yarn prod` does **not** build automatically -- run `yarn build:client` once before starting (the `Dockerfile` builds at image build time).
+Guide:
 
-### Build Client Bundle
+**[Use Case 1 — Expose an HTTP Application](docs/use-case-http.md)**
 
-> **Important:** `dist/` is **not committed to git** (see `.gitignore`) -- a fresh clone has no `dist/` directory. The server serves these bundles to tunnel clients and TCP agents at `/${INSTALL_UUID}-client.js` and `/${INSTALL_UUID}-tcp-agent.js`. If `dist/` is **missing**, those URLs return `500 Internal Server Error` and client/agent installation fails; if it is **stale**, clients download outdated code that may be incompatible with the current server.
+Typical targets:
+
+- Rails;
+- Node.js / Express;
+- FastAPI;
+- Gradio;
+- web dashboards;
+- REST APIs.
+
+---
+
+### 2. Redis / PostgreSQL / generic TCP
+
+Two modes are available.
+
+**Direct TCP** — best on a VPS where you control TCP ports:
+
+```text
+application -> relay:6379 -> WSS /tunnel -> target -> Redis:6379
+```
+
+**TCP-agent mode** — best on one-port PaaS hosting:
+
+```text
+application
+   -> 127.0.0.1:6379
+   -> tcp-agent
+   -> WSS /tcp
+   -> relay
+   -> WSS /tunnel
+   -> target
+   -> Redis:6379
+```
+
+Guide:
+
+**[Use Case 2 — Share Redis, PostgreSQL, and Other TCP Services](docs/use-case-tcp.md)**
+
+---
+
+### 3. SSH / SCP / SFTP
+
+SSH is transported by the same generic TCP tunnel.
+
+```text
+ssh -p 22001 user@127.0.0.1
+       |
+       v
+local tcp-agent
+       |
+    WSS /tcp
+       |
+       v
+relay
+       |
+  WSS /tunnel
+       |
+       v
+kaggle-1 -> 127.0.0.1:2222 sshd
+```
+
+The multi-target topology supports routes such as:
+
+```text
+22001 -> kaggle-1:2222
+22002 -> kaggle-2:2222
+```
+
+Guide:
+
+**[Use Case 3 — SSH, SCP, and SFTP](docs/use-case-ssh.md)**
+
+### Reusable SSH helper scripts
+
+The repository includes three portable helpers under `scripts/`:
+
+| Script | Environment | Purpose |
+|---|---|---|
+| `setup-wss-ssh-target.sh` | Kaggle / Colab / Ubuntu-like target | Create the key-only SSH target, optional passwordless sudo, and register a named tunnel client |
+| `ssh-via-nodejs-wss-service-bridge.sh` | Linux / GitHub Codespaces | Start a local TCP agent route and open SSH to a named target |
+| `ssh-via-nodejs-wss-service-bridge.bat` | Windows | Start the equivalent local TCP agent route with Windows OpenSSH |
+
+The helpers do not hard-code a private relay domain, install UUID, relay credentials, or machine-specific SSH-key path. Configure those values in the environment. Standard key paths such as `$HOME/.ssh/id_ed25519` and `%USERPROFILE%\.ssh\id_ed25519` are used in examples.
+
+Linux / Codespaces example:
 
 ```bash
+export RELAY_HOST='tunnel.example.com'
+export INSTALL_UUID='<stable-install-uuid>'
+export AGENT_USERNAME='<relay-user>'
+
+./scripts/ssh-via-nodejs-wss-service-bridge.sh \
+  "$HOME/.ssh/id_ed25519" \
+  colab-1
+```
+
+Windows example:
+
+```bat
+set "RELAY_HOST=tunnel.example.com"
+set "INSTALL_UUID=<stable-install-uuid>"
+set "AGENT_USERNAME=<relay-user>"
+
+scripts\ssh-via-nodejs-wss-service-bridge.bat "%USERPROFILE%\.ssh\id_ed25519" "colab-1"
+```
+
+Target bootstrap example:
+
+```bash
+export TUNNEL_SERVER_URL='https://tunnel.example.com'
+export TUNNEL_USERNAME='<relay-user>'
+export INSTALL_UUID='<stable-install-uuid>'
+export TUNNEL_PASSWORD='<relay-password>'
+export SSH_PUBLIC_KEY_FILE="$HOME/.ssh/id_ed25519.pub"
+
+sudo -E ./scripts/setup-wss-ssh-target.sh colab-1
+```
+
+Live SSH helper acceptance:
+
+| Local environment | Kaggle target | Colab target | `tmux` continuity |
+|---|---|---|---|
+| Windows 10 | PASS | PASS | PASS on Colab |
+| GitHub Codespaces / Linux | Not re-run in this closeout | PASS | PASS on Colab |
+
+The matrix reports only combinations exercised in the recorded live acceptance; an untested cell is not presented as a failure.
+
+---
+
+## What is actually implemented
+
+At the transport level, the project has two main capabilities:
+
+```text
+Nodejs-WSS-Service-Bridge
+│
+├── HTTP reverse tunnel
+│   └── HTTP apps / REST APIs / web UIs
+│
+└── Generic TCP tunnel
+    ├── Redis
+    ├── PostgreSQL
+    ├── MySQL
+    ├── SSH
+    ├── SCP / SFTP
+    └── other TCP protocols
+```
+
+SSH is a TCP use case, not a separate custom protocol in the relay.
+
+---
+
+# Quick start — deploy your own relay
+
+## Requirements
+
+- Node.js 20 or newer;
+- Git;
+- Corepack/Yarn;
+- Linux recommended;
+- HTTPS endpoint for public Internet deployments.
+
+Clone:
+
+```bash
+git clone https://github.com/dangkhoa2016/Nodejs-WSS-Service-Bridge.git
+cd Nodejs-WSS-Service-Bridge
+
+corepack enable
+yarn install --immutable
 yarn build:client
 ```
 
-Produces `dist/client.js` (tunnel client) and `dist/tcp-agent.js` (TCP agent) -- the standalone esbuild bundles served to tunnel clients and TCP agents. Neither requires the server source tree.
+The build step creates the standalone bundles served to targets and agents:
 
-`yarn dev` builds automatically first (`node serve/build.js && NODE_ENV=development node src/index.js`), so `dist/` is regenerated before the dev server starts. `yarn prod` does **not** build -- run `yarn build:client` manually before starting (for example, after editing `serve/client.js` or `serve/tcp-agent.js`).
+```text
+dist/client.js
+dist/tcp-agent.js
+```
 
-The `Dockerfile` also runs `yarn build:client` at image build time, so Docker deployments are unaffected.
+---
 
-### Environment Variables
+## Choose a server profile
 
-> `.env.example` is only an **index** -- the full commented templates are `.env.example.vps` (direct TCP mode, server binds `TCP_TUNNEL_PORTS`) and `.env.example.single-port` (agent mode, `TCP_AGENT_ALLOWED_PORTS`). The most common settings are shown below; see the templates for every variable and its default. `.env` is auto-loaded only when `NODE_ENV` is unset or `development`.
+### One public port / PaaS
+
+Use:
+
+```bash
+cp .env.example.single-port .env
+```
+
+Recommended for:
+
+- Northflank;
+- Render;
+- Railway;
+- Fly.io-style platforms;
+- other HTTP/HTTPS-only hosts.
+
+HTTP works directly through the relay. TCP and SSH use the TCP agent.
+
+### VPS / dedicated server
+
+Use:
+
+```bash
+cp .env.example.vps .env
+```
+
+A VPS can use both direct TCP and TCP-agent mode.
+
+---
+
+## Minimum configuration
+
+Generate a stable UUID once:
+
+```bash
+node -e "console.log(require('node:crypto').randomUUID())"
+```
+
+Generate a strong password:
+
+```bash
+node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
+```
+
+Set at least:
 
 ```env
-NODE_ENV=development
 PORT=7860
-TUNNEL_PATH=/tunnel
-SERVER_HOST=https://your-server-host
-INSTALL_UUID=
+SERVER_HOST=https://tunnel.example.com
 
-# Required -- WebSocket clients must authenticate
-TUNNEL_USERNAME=your_username
-TUNNEL_PASSWORD=your_password
+INSTALL_UUID=<stable-uuid>
 
-# HTTP stream limits
-MAX_CONCURRENT_STREAMS=200
+TUNNEL_USERNAME=<your-user>
+TUNNEL_PASSWORD=<long-random-secret>
+
 MAX_TUNNEL_CLIENTS=1
-STREAM_IDLE_TIMEOUT_MS=120000
-HTTP_REQUEST_TIMEOUT_MS=0
-
-# WebSocket / frame limits
-WS_HIGH_WATER_BYTES=1048576
-WS_LOW_WATER=524288
-MAX_FRAME_PAYLOAD_BYTES=262144
-WS_MAX_PAYLOAD_BYTES=2097152
-
-# Buffering
-MAX_DEST_BUFFER_BYTES=8388608
-DRAIN_TIMEOUT_MS=30000
-
-# TCP tunnel (optional, direct mode)
-TCP_TUNNEL_HOST=127.0.0.1
-TCP_TUNNEL_PORTS=6379,5432
-TCP_TUNNEL_BIND_HOST=127.0.0.1
-TCP_TUNNEL_ALLOWED_IPS=127.0.0.1
-TCP_CLIENT_ALLOWED_HOSTS=127.0.0.1
-TCP_CONNECT_TIMEOUT_MS=10000
-TCP_MAX_CONNECTIONS_PER_PORT=20
-TCP_SHUTDOWN_DRAIN_TIMEOUT_MS=5000
-
-# TCP agent over WebSocket (optional, agent mode)
-TCP_AGENT_PATH=/tcp
-TCP_AGENT_ALLOWED_PORTS=6379
-TCP_AGENT_USERNAME=agent
-TCP_AGENT_PASSWORD=agent_secret
-TCP_AGENT_ALLOWED_ORIGINS=
-TCP_AGENT_REQUIRE_TLS=false
-TCP_AGENT_TRUSTED_PROXIES=
-TCP_AGENT_MAX_STREAMS_PER_AGENT=100
-
-# Admin config API
-ADMIN_SECRET=your_admin_secret_key
-LOG_FORMAT=text
-VERBOSE=false
 ```
 
-`INSTALL_UUID` is optional -- a random UUID is generated on startup if not set.
-
-### Docker
-
-```bash
-# Build and run
-docker build -t tunnel-server .
-docker run -d --restart=unless-stopped -p 7860:7860 \
-  -e TUNNEL_USERNAME=admin \
-  -e TUNNEL_PASSWORD=secret \
-  tunnel-server
-```
-
----
-
-## Client Connection Guide (`client.js`)
-
-The Client (e.g., on Google Colab or local machine) connects to the Server via the `setup.sh` script:
-
-> By default the server accepts **one** tunnel client at a time; set `MAX_TUNNEL_CLIENTS` to allow more. For deterministic multi-target TCP routing, give each client a unique `TUNNEL_ID` such as `kaggle-1`, `kaggle-2`, or `colab-1`. Duplicate live IDs are rejected, and an unqualified TCP-agent request is rejected when multiple tunnel clients are connected.
-
-**Requirements on the client machine:** `curl`, `node` (>= 20), `npm`, `mv` with GNU `-T` support
-
-The multi-host setup scripts (`setup-service-host.sh`, `setup-application-host.sh`) target **Linux with GNU coreutils/findutils** (`find -printf`, `sort -z`, `cut -z`). On macOS, install GNU tools (`brew install coreutils findutils`, then `alias mv=gmv`; `gfind`/`gsort`/`gcut` must precede the BSD variants on `PATH`) or run the manual install.  Full rollback (restoring runtime configuration from the previous process) requires Linux `/proc/$pid/environ`; on non-Linux platforms, set `ALLOW_CODE_ONLY_ROLLBACK=1` to roll back using the previous code with the current installer's runtime configuration (does not restore the previous process environment).
-
-> On macOS: install coreutils (`brew install coreutils`) for `gmv -T`, then `alias mv=gmv`.
-
-### 1. Automatic Installation via One-Line Command
-```bash
-curl -fsSL https://<your-server-host>/<uuid>-install | bash
-```
-
-### 2. Installation with Pre-set Environment Variables
-```bash
-TUNNEL_SERVER_URL=wss://your-server-host/tunnel \
-TUNNEL_USERNAME=admin \
-TUNNEL_PASSWORD=secret \
-TUNNEL_ID=kaggle-1 \
-TARGET_ORIGIN=http://127.0.0.1:8000 \
-curl -fsSL https://your-server-host/<uuid>-install | bash
-```
-
-Artifacts are downloaded into a unique immutable release directory and validated before the running client is stopped. A validation failure removes the new release and leaves the current client untouched. After activation the installer waits for the client's readiness file before the upgrade is considered complete. A validated release that fails readiness is killed and the previous release is reactivated and re-verified; the rollback restores both the previous code and its previous runtime configuration (credentials, ports, and service settings captured from the running process before it was stopped), so a bad credential or port change cannot break the rollback. If the previous runtime configuration cannot be captured (for example because the old process is no longer running or its environment is unreadable), the installer refuses to stop the running process unless `ALLOW_CODE_ONLY_ROLLBACK=1` is set, in which case it rolls back using the previous code with the current installer's runtime configuration (it does not restore the previous process environment). The failed release's log is preserved under `~/.tunnel-client/logs/` for diagnostics. If the previous release cannot be restored, the install exits nonzero and leaves the failed release for inspection.
-
-### 3. Client Process Management
-- **View Client Logs**: `tail -f ~/.tunnel-client/client.log`
-- **Clear Client Logs**: `> ~/.tunnel-client/client.log`
-- **Stop Client**: `kill $(cat ~/.tunnel-client/client.pid)` (the installer verifies the PID matches the client bundle before killing; on manual use confirm the PID belongs to `client.js`)
-- **Client Readiness**: The file `client.ready` in `~/.tunnel-client/` contains the client PID and is written only after the client has opened an authenticated WebSocket connection to the server's `/tunnel` endpoint, and is written atomically (temp + rename) so a reader never sees partial content. The file is removed when the client disconnects, fails authentication, or stops and is recreated on reconnect, so a stale ready file never reports a dead or disconnected process as healthy.
-
-> **Notebook/runtime lifecycle:** the official installer detaches the client from the installer/notebook-cell lifecycle using `setsid` when available, `nohup`, and stdin from `/dev/null`, while preserving the real client PID used by readiness checks. This protects against the parent shell/cell ending; it does **not** make the process survive a full Kaggle runtime, container, host, or VM restart. After a full runtime restart, rebuild runtime services as needed and re-run the installer with the same `TUNNEL_ID`.
-
----
-
-## TCP Tunnel & TCP Agent
-
-The server supports raw TCP tunneling (Redis, Postgres, MySQL, etc.) alongside HTTP, in two complementary modes that share the same binary frames (`TCP_OPEN`/`TCP_DATA`/`TCP_CLOSE`/`TCP_ABORT` + `PAUSE`/`RESUME`) and bidirectional backpressure.
-
-### Direct mode (server opens TCP listeners)
-
-The server listens on every port in `TCP_TUNNEL_PORTS`. For each inbound connection it asks the connected tunnel client to dial the **same port** on `TCP_TUNNEL_HOST` (usually `127.0.0.1`), then relays bytes in both directions.
-
-```
-External TCP Client -- TCP :6379 --> Server :6379 -- WS /tunnel --> client.js -- 127.0.0.1:6379 --> Redis
-```
-
-- Control access with `TCP_TUNNEL_BIND_HOST` and `TCP_TUNNEL_ALLOWED_IPS` (IPv4/CIDR allowlist).
-- **No port remapping**: the local service must listen on the exact port the external app connects to.
-
-### TCP agent mode (no inbound port on the server)
-
-When the server runs on a PaaS/hosting platform with a single public port, run the standalone **TCP agent** (`dist/tcp-agent.js`) on the app host. It listens on `AGENT_PORTS` locally and relays connections over the server's `/tcp` WebSocket endpoint; the tunnel client on the service machine dials the local service.
-
-```
-Rails -- 127.0.0.1:6379 --> tcp-agent.js -- WS /tcp --> Server -- WS /tunnel --> client.js -- 127.0.0.1:6379 --> Redis
-```
-
-> **Agent mode**: the external app connects to the agent's local port on the app host (e.g. `redis://127.0.0.1:6379`), **not** to the server.
-
-The `/tcp` endpoint only exists when `TCP_AGENT_ALLOWED_PORTS` is non-empty. It is protected by Basic Auth (defaults to the tunnel credentials, overridable with `TCP_AGENT_USERNAME`/`TCP_AGENT_PASSWORD`) and supports optional Origin allowlisting (`TCP_AGENT_ALLOWED_ORIGINS`) and TLS enforcement (`TCP_AGENT_REQUIRE_TLS`, trusting `X-Forwarded-Proto: https` only from proxies listed in `TCP_AGENT_TRUSTED_PROXIES`). The agent bundle is served at `/${INSTALL_UUID}-tcp-agent.js` with a minimal manifest at `/${INSTALL_UUID}-tcp-agent-package.json`.
-
-Both modes can coexist on the same server. See [docs/tcp-tunnel.md](docs/tcp-tunnel.md) for the full configuration guide and Rails/Redis examples.
-
-### Multi-target SSH over one public endpoint
-
-A single public WebSocket endpoint can route different local TCP listeners to different tunnel clients. This is useful when one Northflank service fronts multiple Kaggle/Colab notebooks.
-
-Server example:
+For a one-port server using Redis/PostgreSQL/SSH:
 
 ```env
-MAX_TUNNEL_CLIENTS=5
-TCP_AGENT_ALLOWED_PORTS=2222
+TCP_TUNNEL_PORTS=
+TCP_AGENT_ALLOWED_PORTS=6379,5432,2222
+```
+
+For long-idle SSH:
+
+```env
 STREAM_IDLE_TIMEOUT_MS=0
 ```
 
-Each target connects to the same `/tunnel` URL but registers a different ID:
+---
 
-```env
-# Kaggle notebook 1
-TUNNEL_SERVER_URL=wss://your-service.code.run/tunnel
-TUNNEL_ID=kaggle-1
+## Start
 
-# Kaggle notebook 2
-TUNNEL_SERVER_URL=wss://your-service.code.run/tunnel
-TUNNEL_ID=kaggle-2
-```
-
-On the local machine, one TCP agent can expose several loopback ports:
-
-```env
-TUNNEL_SERVER_URL=wss://your-service.code.run/tcp
-AGENT_ROUTES=22001=kaggle-1:2222,22002=kaggle-2:2222,22003=colab-1:2222
-```
-
-Then separate terminals can connect through the same public endpoint:
+Development:
 
 ```bash
-ssh -p 22001 user@127.0.0.1
-ssh -p 22002 user@127.0.0.1
-ssh -p 22003 user@127.0.0.1
+yarn dev
 ```
 
-`AGENT_ROUTES` uses `localPort=targetTunnelId:targetPort`. It is mutually exclusive with `AGENT_PORTS`. For single-target agent mode, keep using `AGENT_PORTS` and optionally set `TARGET_TUNNEL_ID`.
-
----
-
-## Admin & Runtime Configuration (`/<uuid>-config`)
-
-The Server allows real-time log configuration updates (`verbose`, `logFormat`) **without server restart** via HMAC Signed URLs.
-
-- **Endpoint**: `GET` / `POST` `/<uuid>-config?expires=<TIMESTAMP>&sig=<HMAC_HEX>`
-- **POST Body (JSON)**:
-  ```json
-  {
-    "verbose": true,
-    "logFormat": "json"
-  }
-  ```
-
----
-
-## Health Checks
-
-The server exposes two health check endpoints that always return `200 ok`:
-
-- `GET /__health`
-- `GET /healthz`
-
-These do not require authentication. The Docker image includes a `HEALTHCHECK` directive that pings `/__health`.
-
-The server also serves a small landing page at `GET /__info` that shows the install and config URLs; while no tunnel client is connected, `GET /` redirects to it.
-
----
-
-## Graceful Shutdown
-
-The server handles `SIGTERM` and `SIGINT` by:
-
-1. Stopping TCP listeners and the TCP agent WebSocket endpoint (no new connections) and aborting active TCP streams, allowing up to 5 seconds to drain.
-2. Closing all WebSocket clients (tunnel + agent) and the HTTP server (each WebSocket client is force-terminated after 5 seconds).
-3. Exiting with code 0 (or 1 for `uncaughtException`).
-
-The steps above run concurrently under a 10-second overall grace period, after which the process exits with code 1. Component errors during shutdown are isolated -- one failing component does not block the rest.
-
----
-
-## Testing
-
-The test suite uses the **Node.js built-in test runner** (`node:test`). No `--test-force-exit` flag is needed -- the suite exits cleanly after all tests complete.
+Production from a shell:
 
 ```bash
-npm test
+set -a
+. ./.env
+set +a
+
+yarn build:client
+yarn prod
 ```
 
-See detailed testing instructions in [TESTING.md](TESTING.md).
+> In production mode, the application does not automatically load `.env`; export variables or configure them in your hosting platform.
 
-Run `yarn test` for the current test count, or `yarn check` to run lint, tests, and the client bundle build together. Local real-service tests may skip when Redis/Postgres are unavailable; CI sets `REQUIRE_TCP_SERVICES=1`. TCP coverage includes unit tests for the agent server and virtual socket, a process-level agent test, an end-to-end agent test, plus protocol-negative (`yarn test:protocol-negative`) and bounded soak (`yarn test:soak`) tests.
+Docker:
+
+```bash
+docker build -t nodejs-wss-service-bridge .
+
+docker run --rm   --env-file .env   -p 7860:7860   nodejs-wss-service-bridge
+```
 
 ---
 
-## CI
+## Verify the relay
 
-CI runs on pushes to `main` and pull requests targeting `main`: lint plus standalone bundle verification, tests on Node.js 20, 22, and 24 with Redis and Postgres services available for integration tests, a dependency/commit audit (`yarn npm audit --all` + commit-message checks), a Docker job (build, health check, artifact routes, installer upgrade/rollback), and an installer job. A scheduled soak workflow (`.github/workflows/soak.yml`) runs the bounded TCP agent soak test weekly and on demand.
+```bash
+curl -fsS https://tunnel.example.com/__health
+```
+
+Expected:
+
+```text
+ok
+```
+
+Information page:
+
+```text
+https://tunnel.example.com/__info
+```
+
+Important routes:
+
+| Route | Purpose |
+|---|---|
+| `/tunnel` | target client WebSocket |
+| `/tcp` | TCP-agent WebSocket |
+| `/__health` | health check |
+| `/__info` | deployment information |
+| `/<INSTALL_UUID>-install` | target-client installer |
+| `/<INSTALL_UUID>-client.js` | target-client bundle |
+| `/<INSTALL_UUID>-tcp-agent.js` | TCP-agent bundle |
 
 ---
 
-## License
+# Target-client installation
 
-Licensed under the [MIT License](LICENSE).
+The relay serves an installer for the private target.
+
+HTTP example:
+
+```bash
+export TUNNEL_SERVER_URL='https://tunnel.example.com'
+export TUNNEL_USERNAME='<your-user>'
+export TUNNEL_PASSWORD='<your-secret>'
+export TARGET_ORIGIN='http://127.0.0.1:3000'
+
+curl -fsSL   'https://tunnel.example.com/<INSTALL_UUID>-install'   | bash
+```
+
+State is stored under:
+
+```text
+~/.tunnel-client/
+```
+
+Healthy state:
+
+```text
+client.pid == client.ready == live client PID
+```
+
+Inspect:
+
+```bash
+cat ~/.tunnel-client/client.pid
+cat ~/.tunnel-client/client.ready
+ps -fp "$(cat ~/.tunnel-client/client.pid)"
+tail -n 100 ~/.tunnel-client/client.log
+```
+
+The installer uses a transactional release/readiness model and detaches the target client from the installer/notebook-cell lifecycle using `setsid` when available, `nohup`, and stdin from `/dev/null`.
+
+A full runtime/container/host restart is a different failure domain and requires the process to be started again.
+
+---
+
+# Multi-target TCP routing
+
+Each target can register a unique `TUNNEL_ID`:
+
+```text
+kaggle-1
+kaggle-2
+colab-1
+```
+
+A local TCP agent can then define explicit routes:
+
+```env
+AGENT_ROUTES=22001=kaggle-1:2222,22002=kaggle-2:2222
+```
+
+Syntax:
+
+```text
+localPort=targetTunnelId:targetPort
+```
+
+This enables deterministic routing through one public relay.
+
+---
+
+# Security
+
+The project includes:
+
+- HTTP Basic authentication for tunnel WebSocket clients;
+- separate/fallback authentication for TCP agents;
+- constant-time credential comparison;
+- IPv4/CIDR allowlists for direct TCP listeners;
+- optional TLS enforcement for `/tcp`;
+- trusted-proxy controls;
+- loopback-by-default TCP-agent binding;
+- HMAC-signed admin configuration URLs;
+- transactional client/agent installers with readiness and rollback.
+
+Still follow normal service security practices:
+
+- keep Redis/PostgreSQL authentication enabled;
+- prefer SSH public keys;
+- use firewall rules for direct TCP;
+- do not commit real secrets;
+- do not log SSH/database passwords;
+- use HTTPS/WSS on public deployments.
+
+---
+
+# Important limitations
+
+## HTTP WebSocket Upgrade
+
+The generic HTTP proxy currently does not proxy arbitrary downstream HTTP `Upgrade: websocket` requests.
+
+Normal HTTP request/response traffic works. Applications depending on Action Cable, Socket.IO WebSocket transport, or custom browser WebSocket endpoints must test that requirement separately.
+
+## HTTP with several target clients
+
+`TUNNEL_ID` provides deterministic TCP target selection. Generic HTTP proxying selects an active connected client rather than routing by `TUNNEL_ID`.
+
+For a simple HTTP deployment, keep:
+
+```env
+MAX_TUNNEL_CLIENTS=1
+```
+
+## Process detachment vs host restart
+
+A detached client can survive its parent installer/notebook cell ending while the runtime remains alive.
+
+It cannot survive a full runtime/container/VM/host restart.
+
+---
+
+# Documentation
+
+## Beginner / deployment guides
+
+- **[Start Here — self-hosting guide](docs/START-HERE.md)**
+- **[Use Case 1 — HTTP application](docs/use-case-http.md)**
+- **[Use Case 2 — TCP services](docs/use-case-tcp.md)**
+- **[Use Case 3 — SSH / SCP / SFTP](docs/use-case-ssh.md)**
+
+## Advanced references
+
+- [TCP tunnel deployment and operations](docs/tcp-tunnel.md)
+- [Connect external applications to TCP services](docs/guide-external-app-to-tcp-services.md)
+- [Testing](TESTING.md)
+- [Final live / resilience qualification report](docs/final-live-qualification-2026-08-22.md)
+- [Cross-platform live acceptance report](docs/live-cross-platform-acceptance-2026-08-24.md)
+
+Vietnamese versions are provided alongside the English documentation.
+
+---
+
+# Validation status
+
+The final live/resilience qualification covered:
+
+- two independent target clients;
+- official installer lifecycle;
+- detached-process longevity;
+- multi-target routing;
+- true-idle SSH;
+- target reconnect and isolation;
+- local tcp-agent reconnect;
+- final interactive SSH;
+- SCP;
+- SHA-256 file-integrity verification.
+
+Result:
+
+```text
+FINAL LIVE / RESILIENCE QUALIFICATION = PASS
+```
+
+See [the qualification report](docs/final-live-qualification-2026-08-22.md) for the evidence and tested authority.
+
+A later [cross-platform live acceptance report](docs/live-cross-platform-acceptance-2026-08-24.md) additionally records HTTP, Redis, and PostgreSQL tunneled across independent environments (Colab, Kaggle, Codespaces) through the same relay.
+
+---
+
+# Development and testing
+
+Run the full local checks:
+
+```bash
+yarn check
+```
+
+Individual commands:
+
+```bash
+yarn lint
+yarn test
+yarn build:client
+```
+
+See [TESTING.md](TESTING.md) for detailed test documentation.
+
+---
+
+# License
+
+MIT — see [LICENSE](LICENSE).

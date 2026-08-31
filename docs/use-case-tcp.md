@@ -465,3 +465,4 @@ The tunnel worked far enough to reach the service. Fix Redis ACL/PostgreSQL cred
 - [ ] database authentication remains enabled;
 - [ ] direct-mode firewall/IP allowlist is restrictive.
 
+Live Redis and PostgreSQL tunneling evidence across independent environments is recorded in the [cross-platform live acceptance report](live-cross-platform-acceptance-2026-08-24.md).
