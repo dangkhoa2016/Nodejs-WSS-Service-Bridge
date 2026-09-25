@@ -278,12 +278,12 @@ __metadata:
   languageName: node
   linkType: hard
 
-"dotenv@npm:^18.0.1":
-  version: 18.0.1
-  resolution: "dotenv@npm:18.0.1"
+"dotenv@npm:^18.0.2":
+  version: 18.0.2
+  resolution: "dotenv@npm:18.0.2"
   bin:
     dotenv: dist/index.cjs
-  checksum: 10c0/85f1f3e7e666ea59a50bb9cdcafa989529519e03c3d0bc396ff25fb226930d79beb256210c910a6ffceaa081c35aba7d1c058e667b796dfc0c2cecda9790ce64
+  checksum: 10c0/c16e179205096a7028eea5fba2062dbd25e88d93a0beb66d219507d4585f63ec3f02fda755eee5dca790b7424391a39332830b19983003f0d8d449fbc6845424
   languageName: node
   linkType: hard
 
@@ -381,7 +381,7 @@ __metadata:
   resolution: "nodejs-wss-service-bridge@workspace:."
   dependencies:
     "@biomejs/biome": "npm:^2.5.14"
-    dotenv: "npm:^18.0.1"
+    dotenv: "npm:^18.0.2"
     esbuild: "npm:^0.28.2"
     ws: "npm:^8.21.3"
   languageName: unknown
