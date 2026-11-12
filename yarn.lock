@@ -383,13 +383,13 @@ __metadata:
     "@biomejs/biome": "npm:^2.5.14"
     dotenv: "npm:^18.0.1"
     esbuild: "npm:^0.28.2"
-    ws: "npm:^8.21.3"
+    ws: "npm:^8.22.2"
   languageName: unknown
   linkType: soft
 
-"ws@npm:^8.21.3":
-  version: 8.21.3
-  resolution: "ws@npm:8.21.3"
+"ws@npm:^8.22.2":
+  version: 8.22.2
+  resolution: "ws@npm:8.22.2"
   peerDependencies:
     bufferutil: ^4.0.1
     utf-8-validate: ">=5.0.2"
@@ -398,6 +398,6 @@ __metadata:
       optional: true
     utf-8-validate:
       optional: true
-  checksum: 10c0/7b28dc2863ea0e2cece68d142a3eee90361021b73f750431e6d8076bb7dede5fdfdb75b3d29534b62f411261147b76b1bc80fb5cc63ab0aabd467280e85b22e0
+  checksum: 10c0/77e7f9b2a4b790419bbc799b519a74e856ad0adb46ba0b22445f96d493ca6d4c8758643dc07f1de1f0609ed318bc329571d09a3e6b5327677b5ec31aca730a45
   languageName: node
   linkType: hard
